@@ -1,7 +1,7 @@
 {
   "id": "agent-bootstrap",
   "name": "Agent Bootstrap",
-  "description": "完整的 Agent 核心系统：记忆、情感、心跳、输入、认知、输出、引导",
+  "description": "Complete Agent Core System: Memory, Emotion, Heartbeat, Input, Cognition, Output, Bootstrap",
   "version": "0.0.1",
   "kind": "context-engine",
   "package": "@qcluffy/agent-bootstrap",
