@@ -2,7 +2,7 @@
   "id": "agent-bootstrap",
   "name": "Agent Bootstrap",
   "description": "Complete Agent Core System: Memory, Emotion, Heartbeat, Input, Cognition, Output, Bootstrap",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "kind": "context-engine",
   "package": "@qcluffy/agent-bootstrap",
   "configSchema": {
