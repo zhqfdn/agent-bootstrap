@@ -1,57 +1,36 @@
 /**
- * Emotion System Hook Handler
+ * Emotion System Hook Handler - TypeScript 版本
  * 
- * 集成 Python emotion-system 到 OpenClaw
+ * 直接调用 TypeScript 编译后的 emotion 模块
  */
 
-const fs = require('fs').promises;
 const path = require('path');
-const { spawn } = require('child_process');
 const os = require('os');
 
-// 配置
+// 获取插件目录（而非 workspace/templates）
+const pluginDir = __dirname;
+
+// 配置 - 指向 dist/systems
 const CONFIG = {
-  emotionSystemPath: 'templates/emotion-system',
-  mainScript: 'main.py',
+  emotionSystemPath: path.join(pluginDir, 'dist', 'systems'),
 };
 
 /**
- * 运行 Python emotion-system CLI
+ * 加载 TypeScript 编译后的 EmotionSystem
  */
-async function runPythonCli(args = []) {
-  const workspaceDir = process.env.OPENCLAW_WORKSPACE || 
-    path.join(os.homedir(), '.openclaw', 'workspace');
-  const pythonScript = path.join(workspaceDir, CONFIG.emotionSystemPath, CONFIG.mainScript);
-  
-  return new Promise((resolve) => {
-    fs.access(pythonScript).then(() => {
-      const proc = spawn('python3', [pythonScript, ...args], {
-        cwd: workspaceDir,
-        env: { 
-          ...process.env, 
-          OPENCLAW_WORKSPACE: workspaceDir,
-          PYTHONPATH: path.join(workspaceDir, CONFIG.emotionSystemPath)
-        }
-      });
-      
-      let output = '';
-      let error = '';
-      
-      proc.stdout.on('data', (data) => { output += data.toString(); });
-      proc.stderr.on('data', (data) => { error += data.toString(); });
-      
-      proc.on('close', (code) => {
-        resolve({ success: code === 0, output, error });
-      });
-      
-      proc.on('error', (err) => {
-        resolve({ success: false, error: err.message });
-      });
-      
-    }).catch(() => {
-      resolve({ success: false, error: 'Emotion system not found' });
-    });
-  });
+let EmotionSystem = null;
+
+async function getEmotionSystem() {
+  if (!EmotionSystem) {
+    try {
+      const module = await import(path.join(CONFIG.emotionSystemPath, 'emotion.js'));
+      EmotionSystem = module.EmotionSystem || module.default;
+    } catch (e) {
+      console.error('[emotion-system] Failed to load emotion module:', e.message);
+      return null;
+    }
+  }
+  return EmotionSystem;
 }
 
 /**
@@ -87,11 +66,12 @@ function formatEmotionCompact(state) {
   };
   
   const emoji = moodEmoji[state.mood] || '😐';
-  const e = Math.round(state.energy * 100);
-  const c = Math.round(state.connection * 100);
-  const s = Math.round(state.stress * 100);
+  const e = Math.round((state.energy || 0) * 100);
+  const c = Math.round((state.connection || 0) * 100);
+  const s = Math.round((state.stress || 0) * 100);
+  const level = state.level || 1;
   
-  return `${emoji} Lv.${state.level} ${state.mood} | ⚡${e}% | 💕${c}% | 😰${s}%`;
+  return `${emoji} Lv.${level} ${state.mood || 'neutral'} | ⚡${e}% | 💕${c}% | 😰${s}%`;
 }
 
 /**
@@ -100,19 +80,18 @@ function formatEmotionCompact(state) {
 async function handleSessionStart(event) {
   console.log('[emotion-system] Session start, loading emotion state...');
   
-  const result = await runPythonCli(['state', '--json']);
-  
-  if (result.success && result.output) {
-    try {
-      const state = JSON.parse(result.output);
+  try {
+    const EmotionClass = await getEmotionSystem();
+    if (EmotionClass) {
+      const emotionSystem = new EmotionClass();
+      const state = emotionSystem.getState();
+      
       event.context = event.context || {};
       event.context.emotionState = state;
       console.log('[emotion-system] Emotion state loaded:', state.mood);
-    } catch (e) {
-      console.log('[emotion-system] Parse state error:', e.message);
     }
-  } else {
-    console.log('[emotion-system] Could not load state:', result.error);
+  } catch (e) {
+    console.log('[emotion-system] Could not load state:', e.message);
   }
   
   return event;
@@ -138,10 +117,15 @@ async function handleMessageReceived(event) {
   
   if (!userText || userText.startsWith('/')) return event;
   
-  const result = await runPythonCli(['analyze', userText]);
-  
-  if (result.success) {
-    console.log('[emotion-system] Message analyzed');
+  try {
+    const EmotionClass = await getEmotionSystem();
+    if (EmotionClass) {
+      const emotionSystem = new EmotionClass();
+      emotionSystem.processInput(userText);
+      console.log('[emotion-system] Message analyzed');
+    }
+  } catch (e) {
+    console.log('[emotion-system] Analyze error:', e.message);
   }
   
   return event;
@@ -153,10 +137,17 @@ async function handleMessageReceived(event) {
 async function handleAgentEnd(event) {
   console.log('[emotion-system] Agent end, updating emotion...');
   
-  await runPythonCli(['boost']);
-  await runPythonCli(['success']);
-  
-  console.log('[emotion-system] Emotion updated');
+  try {
+    const EmotionClass = await getEmotionSystem();
+    if (EmotionClass) {
+      const emotionSystem = new EmotionClass();
+      emotionSystem.boost();
+      emotionSystem.recordSuccess();
+      console.log('[emotion-system] Emotion updated');
+    }
+  } catch (e) {
+    console.log('[emotion-system] Update error:', e.message);
+  }
   
   return event;
 }
@@ -166,7 +157,18 @@ async function handleAgentEnd(event) {
  */
 async function handleHeartbeat(event) {
   console.log('[emotion-system] Heartbeat, applying decay...');
-  await runPythonCli(['decay']);
+  
+  try {
+    const EmotionClass = await getEmotionSystem();
+    if (EmotionClass) {
+      const emotionSystem = new EmotionClass();
+      emotionSystem.decay();
+      console.log('[emotion-system] Decay applied');
+    }
+  } catch (e) {
+    console.log('[emotion-system] Decay error:', e.message);
+  }
+  
   return event;
 }
 
@@ -174,13 +176,14 @@ async function handleHeartbeat(event) {
  * 获取当前情感状态
  */
 async function getEmotionState() {
-  const result = await runPythonCli(['state', '--json']);
-  if (result.success) {
-    try {
-      return JSON.parse(result.output);
-    } catch (e) {
-      return null;
+  try {
+    const EmotionClass = await getEmotionSystem();
+    if (EmotionClass) {
+      const emotionSystem = new EmotionClass();
+      return emotionSystem.getState();
     }
+  } catch (e) {
+    return null;
   }
   return null;
 }
@@ -214,7 +217,6 @@ async function handle(event) {
     else if (type === 'command') {
       if (action === 'emotion' || action === '状态' || action === 'state') {
         const state = await getEmotionState();
-        // 简洁版手机端显示
         event.response = formatEmotionCompact(state);
       }
     }
@@ -231,7 +233,7 @@ module.exports.getEmotionState = getEmotionState;
 module.exports.formatEmotionCompact = formatEmotionCompact;
 module.exports.metadata = {
   name: 'emotion-system',
-  description: '集成情感系统，管理 Agent 心情、能量、连接感和压力',
+  description: 'Emotion System: manages agent mood, energy, connection and stress',
   events: ['session', 'message', 'lifecycle', 'heartbeat', 'command'],
   version: '1.0.0',
 };

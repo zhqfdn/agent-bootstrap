@@ -1,176 +1,107 @@
 /**
- * Bootstrap System Hook Handler
+ * Bootstrap System Hook Handler - TypeScript 版本
  * 
- * 集成 Python bootstrap-system 到 OpenClaw
+ * 直接调用 TypeScript 编译后的 bootstrap 模块
  */
 
-const fs = require('fs').promises;
 const path = require('path');
-const { spawn } = require('child_process');
-const os = require('os');
+const fs = require('fs');
 
-// 配置
+// 获取插件目录
+const pluginDir = __dirname;
+
+// 配置 - 指向 dist/systems
 const CONFIG = {
-  bootstrapSystemPath: 'templates/bootstrap-system',
-  mainScript: 'main.py',
+  bootstrapSystemPath: path.join(pluginDir, 'dist', 'systems'),
 };
 
 /**
- * 运行 Python bootstrap-system CLI
+ * 加载 TypeScript 编译后的 BootstrapEngine
  */
-async function runPythonCli(args = []) {
-  const workspaceDir = process.env.OPENCLAW_WORKSPACE || 
-    path.join(os.homedir(), '.openclaw', 'workspace');
-  const pythonScript = path.join(workspaceDir, CONFIG.bootstrapSystemPath, CONFIG.mainScript);
-  
-  return new Promise((resolve) => {
-    fs.access(pythonScript).then(() => {
-      const proc = spawn('python3', [pythonScript, ...args], {
-        cwd: workspaceDir,
-        env: { 
-          ...process.env, 
-          OPENCLAW_WORKSPACE: workspaceDir,
-          PYTHONPATH: path.join(workspaceDir, CONFIG.bootstrapSystemPath)
-        }
-      });
-      
-      let output = '';
-      let error = '';
-      
-      proc.stdout.on('data', (data) => { output += data.toString(); });
-      proc.stderr.on('data', (data) => { error += data.toString(); });
-      
-      proc.on('close', (code) => {
-        resolve({ success: code === 0, output, error });
-      });
-      
-      proc.on('error', (err) => {
-        resolve({ success: false, error: err.message });
-      });
-      
-    }).catch(() => {
-      resolve({ success: false, error: 'Bootstrap system not found' });
-    });
-  });
+let BootstrapEngine = null;
+
+async function getBootstrapEngine() {
+  if (!BootstrapEngine) {
+    try {
+      const module = await import(path.join(CONFIG.bootstrapSystemPath, 'bootstrap.js'));
+      BootstrapEngine = module.BootstrapEngine || module.default;
+    } catch (e) {
+      console.error('[bootstrap-system] Failed to load bootstrap module:', e.message);
+      return null;
+    }
+  }
+  return BootstrapEngine;
 }
 
 /**
- * 从会话消息中提取文本内容
+ * 检查是否需要引导
  */
-function extractMessageText(message) {
-  if (!message || !message.content) return '';
-  
-  if (typeof message.content === 'string') {
-    return message.content;
-  }
-  
-  if (Array.isArray(message.content)) {
-    return message.content
-      .filter((c) => c.type === 'text')
-      .map((c) => c.text || '')
-      .join('');
-  }
-  
-  return '';
-}
-
-/**
- * 处理 session_start - 检查是否需要引导
- */
-async function handleSessionStart(event) {
+async function checkBootstrap(event) {
   console.log('[bootstrap-system] Checking bootstrap status...');
   
-  const result = await runPythonCli(['status', '--json']);
-  
-  if (result.success && result.output) {
-    try {
-      const status = JSON.parse(result.output);
-      event.context = event.context || {};
-      event.context.bootstrap = status;
-      
-      if (!status.is_completed && status.status === 'not_started') {
-        // 需要开始引导
-        event.needsBootstrap = true;
-        console.log('[bootstrap-system] Bootstrap needed');
-      } else if (status.is_completed) {
-        console.log('[bootstrap-system] Bootstrap already completed');
-      }
-    } catch (e) {
-      console.log('[bootstrap-system] Parse error:', e.message);
+  try {
+    const workspaceDir = process.env.OPENCLAW_WORKSPACE || 
+      path.join(process.env.HOME || '', '.openclaw', 'workspace');
+    
+    // 检查关键文件是否存在
+    const requiredFiles = ['IDENTITY.md', 'SOUL.md', 'USER.md'];
+    const missing = requiredFiles.filter(f => 
+      !fs.existsSync(path.join(workspaceDir, f))
+    );
+    
+    if (missing.length > 0) {
+      console.log('[bootstrap-system] Bootstrap needed, missing:', missing);
+      event.needsBootstrap = true;
+      event.bootstrapFiles = missing;
+    } else {
+      console.log('[bootstrap-system] Bootstrap not needed');
+      event.needsBootstrap = false;
     }
+  } catch (e) {
+    console.log('[bootstrap-system] Check error:', e.message);
   }
   
   return event;
 }
 
 /**
- * 处理 bootstrap 命令
+ * 处理 bootstrap:start - 开始引导
  */
-async function handleBootstrapCommand(event) {
-  const action = event.action;
-  const input = event.input || '';
+async function handleBootstrapStart(event) {
+  console.log('[bootstrap-system] Starting bootstrap...');
   
-  if (action === 'start' || action === 'begin') {
-    // 开始引导
-    const result = await runPythonCli(['start']);
-    event.response = result.output;
-  }
-  else if (action === 'step') {
-    // 查看当前步骤
-    const result = await runPythonCli(['step']);
-    event.response = result.output;
-  }
-  else if (action === 'submit' || action === 'next') {
-    // 提交输入
-    const result = await runPythonCli(['submit', input]);
-    event.response = result.output;
-    
-    // 检查是否完成
-    if (result.output.includes('初始化完成') || result.output.includes('completed')) {
-      event.bootstrapCompleted = true;
+  try {
+    const BootstrapClass = await getBootstrapEngine();
+    if (BootstrapClass) {
+      const bootstrap = new BootstrapEngine();
+      const context = await bootstrap.start();
+      
+      event.bootstrapContext = context;
+      console.log('[bootstrap-system] Bootstrap started');
     }
-  }
-  else if (action === 'status') {
-    // 查看状态
-    const result = await runPythonCli(['status']);
-    event.response = result.output;
-  }
-  else if (action === 'reset') {
-    // 重置
-    const result = await runPythonCli(['reset']);
-    event.response = '✓ 引导已重置，请重新开始';
+  } catch (e) {
+    console.log('[bootstrap-system] Bootstrap error:', e.message);
   }
   
   return event;
 }
 
 /**
- * 处理用户消息 - 检查是否是引导输入
+ * 处理 bootstrap:complete - 引导完成
  */
-async function handleMessage(event) {
-  const context = event.context || {};
+async function handleBootstrapComplete(event) {
+  console.log('[bootstrap-system] Bootstrap completed...');
   
-  // 检查是否正在进行引导
-  if (context.bootstrap && context.bootstrap.status === 'in_progress') {
-    const messages = context.messages || [];
-    const reversed = [...messages].reverse();
-    const lastUserMsg = reversed.find((m) => m.role === 'user');
-    
-    if (lastUserMsg) {
-      const userText = extractMessageText(lastUserMsg);
+  try {
+    const BootstrapClass = await getBootstrapEngine();
+    if (BootstrapClass) {
+      const bootstrap = new BootstrapEngine();
+      await bootstrap.complete(event.bootstrapData);
       
-      if (userText && !userText.startsWith('/')) {
-        // 提交作为引导输入
-        console.log('[bootstrap-system] Submitting bootstrap input:', userText.substring(0, 20));
-        const result = await runPythonCli(['submit', userText]);
-        
-        event.bootstrapResponse = result.output;
-        
-        if (result.output.includes('初始化完成') || result.output.includes('completed')) {
-          event.bootstrapCompleted = true;
-        }
-      }
+      console.log('[bootstrap-system] Bootstrap completed');
     }
+  } catch (e) {
+    console.log('[bootstrap-system] Complete error:', e.message);
   }
   
   return event;
@@ -187,19 +118,13 @@ async function handle(event) {
   
   try {
     if (type === 'session' || type === 'session:start') {
-      await handleSessionStart(event);
+      await checkBootstrap(event);
     }
-    else if (type === 'message' || type === 'message:received') {
-      await handleMessage(event);
+    else if (type === 'bootstrap' || type === 'bootstrap:start') {
+      await handleBootstrapStart(event);
     }
-    else if (type === 'command') {
-      // 处理引导命令
-      if (action === 'bootstrap' || action === '引导' || action === '开始') {
-        await handleBootstrapCommand(event);
-      }
-      else if (['start', 'step', 'submit', 'status', 'reset'].includes(action)) {
-        await handleBootstrapCommand(event);
-      }
+    else if (type === 'bootstrap' || type === 'bootstrap:complete') {
+      await handleBootstrapComplete(event);
     }
   } catch (error) {
     console.error('[bootstrap-system] Handler error:', error.message);
@@ -212,8 +137,8 @@ module.exports = handle;
 module.exports.handle = handle;
 module.exports.metadata = {
   name: 'bootstrap-system',
-  description: '初始化引导系统，交互式收集用户配置、塑造Agent人格',
-  events: ['session', 'message', 'command'],
+  description: 'Bootstrap System: interactive agent initialization and configuration',
+  events: ['session', 'bootstrap'],
   version: '1.0.0',
 };
 

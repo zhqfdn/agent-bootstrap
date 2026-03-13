@@ -1,169 +1,134 @@
 /**
- * Memory System Hook Handler
+ * Memory System Hook Handler - TypeScript 版本
  * 
- * 集成 Python memory-system 到 OpenClaw
+ * 直接调用 TypeScript 编译后的 memory 模块
  */
 
-const fs = require('fs').promises;
 const path = require('path');
-const { spawn } = require('child_process');
-const os = require('os');
 
-// 配置
+// 获取插件目录
+const pluginDir = __dirname;
+
+// 配置 - 指向 dist/systems
 const CONFIG = {
-  memorySystemPath: 'templates/memory-system',
-  cliScript: 'cli.py',
+  memorySystemPath: path.join(pluginDir, 'dist', 'systems'),
 };
 
 /**
- * 运行 Python memory-system CLI
+ * 加载 TypeScript 编译后的 MemorySystem
  */
-async function runPythonCli(args) {
-  const workspaceDir = process.env.OPENCLAW_WORKSPACE || 
-    path.join(os.homedir(), '.openclaw', 'workspace');
-  const pythonScript = path.join(workspaceDir, CONFIG.memorySystemPath, CONFIG.cliScript);
+let MemorySystem = null;
+
+async function getMemorySystem() {
+  if (!MemorySystem) {
+    try {
+      const module = await import(path.join(CONFIG.memorySystemPath, 'memory.js'));
+      MemorySystem = module.MemorySystem || module.default;
+    } catch (e) {
+      console.error('[memory-system] Failed to load memory module:', e.message);
+      return null;
+    }
+  }
+  return MemorySystem;
+}
+
+/**
+ * 处理 message:received - 自动保存记忆
+ */
+async function handleMessageReceived(event) {
+  console.log('[memory-system] Auto-saving memory...');
   
-  return new Promise((resolve) => {
-    fs.access(pythonScript).then(() => {
-      const proc = spawn('python3', [pythonScript, ...args], {
-        cwd: workspaceDir,
-        env: { 
-          ...process.env, 
-          OPENCLAW_WORKSPACE: workspaceDir,
-          PYTHONPATH: path.join(workspaceDir, CONFIG.memorySystemPath)
-        }
-      });
+  try {
+    const MemoryClass = await getMemorySystem();
+    if (MemoryClass) {
+      const ms = new MemoryClass();
+      const context = event.context || {};
+      const messages = context.messages || [];
       
-      let output = '';
-      let error = '';
-      
-      proc.stdout.on('data', (data) => { output += data.toString(); });
-      proc.stderr.on('data', (data) => { error += data.toString(); });
-      
-      proc.on('close', (code) => {
-        try {
-          if (output) {
-            const result = JSON.parse(output);
-            resolve(result);
-          } else {
-            resolve({ success: false, error: 'No output' });
+      // 保存最近的对话
+      if (messages.length > 0) {
+        const recent = messages.slice(-5);
+        for (const msg of recent) {
+          if (msg.role && msg.content) {
+            ms.save(`[${msg.role}] ${msg.content}`, {
+              type: 'episodic',
+              tags: ['对话'],
+            });
           }
-        } catch (e) {
-          resolve({ success: false, error: error || 'Parse error' });
         }
-      });
-      
-      proc.on('error', (err) => {
-        resolve({ success: false, error: err.message });
-      });
-      
-    }).catch(() => {
-      resolve({ success: false, error: 'Memory system not found' });
-    });
-  });
-}
-
-/**
- * 从会话消息中提取文本内容
- */
-function extractMessageText(message) {
-  if (!message || !message.content) return '';
-  
-  if (typeof message.content === 'string') {
-    return message.content;
-  }
-  
-  if (Array.isArray(message.content)) {
-    return message.content
-      .filter((c) => c.type === 'text')
-      .map((c) => c.text || '')
-      .join('');
-  }
-  
-  return '';
-}
-
-/**
- * 生成上下文摘要
- */
-function formatContextSummary(data) {
-  if (!data || !data.success || !data.context) return '';
-  
-  const { context } = data;
-  const lines = [];
-  
-  if (context.preferences) {
-    const p = context.preferences;
-    if (p.userName || p.agentName) {
-      lines.push(`【用户信息】名字: ${p.userName || p.agentName || '未知'}`);
-    }
-  }
-  
-  if (context.recent_memories && context.recent_memories.length > 0) {
-    lines.push('【近期记忆】');
-    context.recent_memories.slice(0, 3).forEach((m) => {
-      const content = m.content ? m.content.substring(0, 50) : '';
-      const date = m.created_at ? m.created_at.substring(0, 10) : '';
-      lines.push(`  - [${date}] ${content}...`);
-    });
-  }
-  
-  return lines.length > 0 ? '\n' + lines.join('\n') : '';
-}
-
-/**
- * 处理 session_start
- */
-async function handleSessionStart(event) {
-  console.log('[memory-system] Session start, loading context...');
-  
-  const context = event.context || {};
-  const result = await runPythonCli(['get_context']);
-  
-  if (result.success && result.context) {
-    const summary = formatContextSummary(result);
-    if (summary) {
-      if (!context.prependContext) context.prependContext = '';
-      context.prependContext += '\n\n--- 记忆系统 ---\n' + summary;
-      console.log('[memory-system] Context injected successfully');
-    }
-  } else {
-    console.log('[memory-system] No context to load:', result.error);
-  }
-  
-  event.context = context;
-}
-
-/**
- * 处理 agent_end
- */
-async function handleAgentEnd(event) {
-  console.log('[memory-system] Agent end, saving conversation...');
-  
-  const context = event.context || {};
-  const messages = context.messages || [];
-  
-  if (messages.length === 0) return;
-  
-  const reversed = [...messages].reverse();
-  const lastUserMsg = reversed.find((m) => m.role === 'user');
-  const lastAssistantMsg = reversed.find((m) => m.role === 'assistant');
-  
-  if (lastUserMsg) {
-    const userText = extractMessageText(lastUserMsg);
-    const assistantText = lastAssistantMsg ? extractMessageText(lastAssistantMsg) : '';
-    
-    if (userText && userText.length < 1000 && !userText.startsWith('/')) {
-      const content = `用户: ${userText}\n助手: ${assistantText}`;
-      const result = await runPythonCli(['save', content, 'episodic', '对话', '0.3']);
-      
-      if (result.success) {
-        console.log('[memory-system] Conversation saved:', result.memory_id);
-      } else {
-        console.log('[memory-system] Save failed:', result.error);
       }
+      console.log('[memory-system] Memory saved');
+    }
+  } catch (e) {
+    console.log('[memory-system] Save error:', e.message);
+  }
+  
+  return event;
+}
+
+/**
+ * 处理 session_end - 保存会话记忆
+ */
+async function handleSessionEnd(event) {
+  console.log('[memory-system] Session end, saving context...');
+  
+  try {
+    const MemoryClass = await getMemorySystem();
+    if (MemoryClass) {
+      const ms = new MemoryClass();
+      const context = event.context || {};
+      
+      // 保存会话摘要
+      if (context.summary) {
+        ms.rememberThis(`会话摘要: ${context.summary}`, true);
+      }
+      
+      console.log('[memory-system] Session memory saved');
+    }
+  } catch (e) {
+    console.log('[memory-system] Session save error:', e.message);
+  }
+  
+  return event;
+}
+
+/**
+ * 处理 command - 搜索记忆
+ */
+async function handleCommand(event) {
+  const action = event.action || '';
+  
+  if (action === 'remember' || action === '记忆') {
+    try {
+      const MemoryClass = await getMemorySystem();
+      if (MemoryClass) {
+        const ms = new MemoryClass();
+        const content = event.params?.content || '';
+        
+        if (content) {
+          ms.rememberThis(content, event.params?.important || false);
+          event.response = '已记住: ' + content;
+        }
+      }
+    } catch (e) {
+      event.response = '记忆错误: ' + e.message;
     }
   }
+  else if (action === 'recall' || action === '想起') {
+    try {
+      const MemoryClass = await getMemorySystem();
+      if (MemoryClass) {
+        const ms = new MemorySystem();
+        const about = event.params?.about || '';
+        
+        event.response = ms.whatDoYouRemember(about);
+      }
+    } catch (e) {
+      event.response = '回忆错误: ' + e.message;
+    }
+  }
+  
+  return event;
 }
 
 /**
@@ -176,38 +141,29 @@ async function handle(event) {
   console.log(`[memory-system] Event: ${type}/${action}`);
   
   try {
-    if (type === 'command') {
-      if (action === 'new' || action === 'reset') {
-        await handleAgentEnd(event);
-      }
-    }
-    else if (type === 'lifecycle' || type === 'lifecycle:end') {
-      if (action === 'end' || action === '') {
-        await handleAgentEnd(event);
-      }
-    }
-    else if (type === 'session' || type === 'session:start') {
-      if (action === 'start' || action === '') {
-        await handleSessionStart(event);
-      }
-    }
-    else if (type === 'message' || type === 'message:received') {
+    if (type === 'message' || type === 'message:received') {
       await handleMessageReceived(event);
+    }
+    else if (type === 'session' || type === 'session:end') {
+      await handleSessionEnd(event);
+    }
+    else if (type === 'command') {
+      await handleCommand(event);
     }
   } catch (error) {
     console.error('[memory-system] Handler error:', error.message);
   }
+  
+  return event;
 }
 
-// 默认导出
 module.exports = handle;
 module.exports.handle = handle;
 module.exports.metadata = {
   name: 'memory-system',
-  description: '集成记忆系统，自动保存对话和加载历史上下文',
-  events: ['command', 'lifecycle', 'session'],
+  description: 'Memory System: auto-save conversations and context',
+  events: ['session', 'message', 'command'],
   version: '1.0.0',
 };
 
-// 也导出 default 兼容
 module.exports.default = handle;

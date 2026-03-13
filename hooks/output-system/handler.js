@@ -1,149 +1,81 @@
 /**
- * Output System Hook Handler
+ * Output System Hook Handler - TypeScript 版本
  * 
- * 集成 Python output-system 到 OpenClaw
+ * 直接调用 TypeScript 编译后的 output 模块
  */
 
-const fs = require('fs').promises;
 const path = require('path');
-const { spawn } = require('child_process');
-const os = require('os');
 
-// 配置
+// 获取插件目录
+const pluginDir = __dirname;
+
+// 配置 - 指向 dist/systems
 const CONFIG = {
-  outputSystemPath: 'templates/output-system',
-  mainScript: 'main.py',
+  outputSystemPath: path.join(pluginDir, 'dist', 'systems'),
 };
 
 /**
- * 运行 Python output-system CLI
+ * 加载 TypeScript 编译后的 OutputSystem
  */
-async function runPythonCli(args = []) {
-  const workspaceDir = process.env.OPENCLAW_WORKSPACE || 
-    path.join(os.homedir(), '.openclaw', 'workspace');
-  const pythonScript = path.join(workspaceDir, CONFIG.outputSystemPath, CONFIG.mainScript);
-  
-  return new Promise((resolve) => {
-    fs.access(pythonScript).then(() => {
-      const proc = spawn('python3', [pythonScript, ...args], {
-        cwd: workspaceDir,
-        env: { 
-          ...process.env, 
-          OPENCLAW_WORKSPACE: workspaceDir,
-          PYTHONPATH: path.join(workspaceDir, CONFIG.outputSystemPath)
-        }
-      });
-      
-      let output = '';
-      let error = '';
-      
-      proc.stdout.on('data', (data) => { output += data.toString(); });
-      proc.stderr.on('data', (data) => { error += data.toString(); });
-      
-      proc.on('close', (code) => {
-        resolve({ success: code === 0, output, error });
-      });
-      
-      proc.on('error', (err) => {
-        resolve({ success: false, error: err.message });
-      });
-      
-    }).catch(() => {
-      resolve({ success: false, error: 'Output system not found' });
-    });
-  });
-}
+let OutputSystem = null;
 
-/**
- * 格式化输出
- */
-function formatOutput(content, context) {
-  const style = context?.replyStrategy?.style || 'friendly';
-  const format = context?.replyStrategy?.format || 'text';
-  
-  // 附加情感状态
-  let emotionLine = '';
-  if (context?.emotionState) {
-    const e = context.emotionState;
-    emotionLine = `\n${e.mood_emoji || '🧐'} Lv.${e.level} | ⚡${Math.round(e.energy*100)}% | 💕${Math.round(e.connection*100)}%`;
+async function getOutputSystem() {
+  if (!OutputSystem) {
+    try {
+      const module = await import(path.join(CONFIG.outputSystemPath, 'output.js'));
+      OutputSystem = module.OutputSystem || module.default;
+    } catch (e) {
+      console.error('[output-system] Failed to load output module:', e.message);
+      return null;
+    }
   }
-  
-  return content + emotionLine;
+  return OutputSystem;
 }
 
 /**
- * 处理 agent_start - 准备输出
+ * 处理 agent:before - 准备输出
  */
-async function handleAgentStart(event) {
+async function handleBeforeAgent(event) {
   console.log('[output-system] Preparing output...');
   
-  const context = event.context || {};
-  
-  // 获取回复策略
-  const strategy = context.replyStrategy || {};
-  
-  // 准备输出格式
-  context.outputConfig = {
-    style: strategy.style || 'friendly',
-    format: strategy.format || 'text',
-    includeEmotion: true,
-  };
-  
-  return event;
-}
-
-/**
- * 处理 agent_end - 生成输出
- */
-async function handleAgentEnd(event) {
-  console.log('[output-system] Generating output...');
-  
-  const context = event.context || {};
-  const messages = context.messages || [];
-  
-  // 获取最后助手回复
-  const reversed = [...messages].reverse();
-  const lastAssistantMsg = reversed.find((m) => m.role === 'assistant');
-  
-  if (lastAssistantMsg) {
-    // 获取内容
-    let content = '';
-    if (typeof lastAssistantMsg.content === 'string') {
-      content = lastAssistantMsg.content;
-    } else if (Array.isArray(lastAssistantMsg.content)) {
-      content = lastAssistantMsg.content
-        .filter((c) => c.type === 'text')
-        .map((c) => c.text || '')
-        .join('');
+  try {
+    const OutputClass = await getOutputSystem();
+    if (OutputClass) {
+      const outputSystem = new OutputClass();
+      const context = event.context || {};
+      
+      // 应用输出格式化
+      context.outputStyle = context.outputStyle || 'direct';
+      
+      event.context = context;
+      console.log('[output-system] Output prepared, style:', context.outputStyle);
     }
-    
-    // 格式化输出（附加情感状态）
-    const formattedContent = formatOutput(content, context);
-    
-    // 更新消息
-    lastAssistantMsg.content = formattedContent;
-    
-    console.log('[output-system] Output formatted with emotion state');
+  } catch (e) {
+    console.log('[output-system] Prepare error:', e.message);
   }
   
   return event;
 }
 
 /**
- * 执行行动
+ * 处理 agent:end - 收集反馈
  */
-async function handleExecuteAction(event) {
-  const action = event.action;
-  const params = event.params || {};
+async function handleAgentEnd(event) {
+  console.log('[output-system] Collecting feedback...');
   
-  if (action) {
-    const result = await runPythonCli([
-      'action',
-      action,
-      JSON.stringify(params)
-    ]);
-    
-    event.actionResult = result;
+  try {
+    const OutputClass = await getOutputSystem();
+    if (OutputClass) {
+      const outputSystem = new OutputClass();
+      const response = event.response;
+      
+      if (response) {
+        // 可以在这里记录输出统计
+        console.log('[output-system] Response sent, length:', response.length);
+      }
+    }
+  } catch (e) {
+    console.log('[output-system] Feedback error:', e.message);
   }
   
   return event;
@@ -159,22 +91,11 @@ async function handle(event) {
   console.log(`[output-system] Event: ${type}/${action}`);
   
   try {
-    if (type === 'agent' || type === 'agent_start') {
-      await handleAgentStart(event);
+    if (type === 'agent' || type === 'agent:before') {
+      await handleBeforeAgent(event);
     }
-    else if (type === 'lifecycle' || type === 'lifecycle:end' || type === 'agent_end') {
+    else if (type === 'agent' || type === 'agent:end') {
       await handleAgentEnd(event);
-    }
-    else if (type === 'command') {
-      if (action === 'execute' || action === 'run') {
-        await handleExecuteAction(event);
-      }
-      else if (action === 'output' || action === 'status') {
-        const result = await runPythonCli(['status', '--json']);
-        if (result.success) {
-          event.response = result.output;
-        }
-      }
     }
   } catch (error) {
     console.error('[output-system] Handler error:', error.message);
@@ -187,8 +108,8 @@ module.exports = handle;
 module.exports.handle = handle;
 module.exports.metadata = {
   name: 'output-system',
-  description: '输出执行系统，语言生成、行动执行、反馈收集、多模态输出',
-  events: ['agent', 'lifecycle', 'command'],
+  description: 'Output System: format and execute agent output',
+  events: ['agent'],
   version: '1.0.0',
 };
 

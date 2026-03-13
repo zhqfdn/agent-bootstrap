@@ -1,6 +1,6 @@
 {
   "name": "@qcluffy/agent-bootstrap",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "OpenClaw Agent Plugin - Complete Agent Core System: Memory, Emotion, Heartbeat, Input, Cognition, Output, Bootstrap",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

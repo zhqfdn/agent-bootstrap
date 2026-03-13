@@ -1,57 +1,35 @@
 /**
- * Heartbeat System Hook Handler
+ * Heartbeat System Hook Handler - TypeScript 版本
  * 
- * 集成 Python heartbeat-system 到 OpenClaw
+ * 直接调用 TypeScript 编译后的 heartbeat 模块
  */
 
-const fs = require('fs').promises;
 const path = require('path');
-const { spawn } = require('child_process');
-const os = require('os');
 
-// 配置
+// 获取插件目录
+const pluginDir = __dirname;
+
+// 配置 - 指向 dist/systems
 const CONFIG = {
-  heartbeatSystemPath: 'templates/heartbeat-system',
-  mainScript: 'main.py',
+  heartbeatSystemPath: path.join(pluginDir, 'dist', 'systems'),
 };
 
 /**
- * 运行 Python heartbeat-system CLI
+ * 加载 TypeScript 编译后的 HeartbeatSystem
  */
-async function runPythonCli(args = []) {
-  const workspaceDir = process.env.OPENCLAW_WORKSPACE || 
-    path.join(os.homedir(), '.openclaw', 'workspace');
-  const pythonScript = path.join(workspaceDir, CONFIG.heartbeatSystemPath, CONFIG.mainScript);
-  
-  return new Promise((resolve) => {
-    fs.access(pythonScript).then(() => {
-      const proc = spawn('python3', [pythonScript, ...args], {
-        cwd: workspaceDir,
-        env: { 
-          ...process.env, 
-          OPENCLAW_WORKSPACE: workspaceDir,
-          PYTHONPATH: path.join(workspaceDir, CONFIG.heartbeatSystemPath)
-        }
-      });
-      
-      let output = '';
-      let error = '';
-      
-      proc.stdout.on('data', (data) => { output += data.toString(); });
-      proc.stderr.on('data', (data) => { error += data.toString(); });
-      
-      proc.on('close', (code) => {
-        resolve({ success: code === 0, output, error });
-      });
-      
-      proc.on('error', (err) => {
-        resolve({ success: false, error: err.message });
-      });
-      
-    }).catch(() => {
-      resolve({ success: false, error: 'Heartbeat system not found' });
-    });
-  });
+let HeartbeatSystem = null;
+
+async function getHeartbeatSystem() {
+  if (!HeartbeatSystem) {
+    try {
+      const module = await import(path.join(CONFIG.heartbeatSystemPath, 'heartbeat.js'));
+      HeartbeatSystem = module.HeartbeatSystem || module.default;
+    } catch (e) {
+      console.error('[heartbeat-system] Failed to load heartbeat module:', e.message);
+      return null;
+    }
+  }
+  return HeartbeatSystem;
 }
 
 /**
@@ -60,12 +38,15 @@ async function runPythonCli(args = []) {
 async function handleHeartbeat(event) {
   console.log('[heartbeat-system] Heartbeat pulse, running tasks...');
   
-  const result = await runPythonCli(['run', '--once']);
-  
-  if (result.success) {
-    console.log('[heartbeat-system] Tasks completed');
-  } else {
-    console.log('[heartbeat-system] Tasks failed:', result.error);
+  try {
+    const HeartbeatClass = await getHeartbeatSystem();
+    if (HeartbeatClass) {
+      const hb = new HeartbeatClass();
+      await hb.tick();
+      console.log('[heartbeat-system] Tasks completed');
+    }
+  } catch (e) {
+    console.log('[heartbeat-system] Tasks error:', e.message);
   }
   
   return event;
@@ -75,10 +56,15 @@ async function handleHeartbeat(event) {
  * 处理 status 命令
  */
 async function handleStatus(event) {
-  const result = await runPythonCli(['status', '--json']);
-  
-  if (result.success) {
-    event.response = result.output;
+  try {
+    const HeartbeatClass = await getHeartbeatSystem();
+    if (HeartbeatClass) {
+      const hb = new HeartbeatClass();
+      const status = hb.getStatus();
+      event.response = JSON.stringify(status, null, 2);
+    }
+  } catch (e) {
+    event.response = 'Heartbeat system error: ' + e.message;
   }
   
   return event;
@@ -113,7 +99,7 @@ module.exports = handle;
 module.exports.handle = handle;
 module.exports.metadata = {
   name: 'heartbeat-system',
-  description: '心跳系统，定时执行情感衰减、状态保存、垃圾清理',
+  description: 'Heartbeat System: periodic tasks for emotion decay, state saving, cleanup',
   events: ['heartbeat', 'pulse', 'command'],
   version: '1.0.0',
 };
