@@ -1,6 +1,6 @@
 {
   "name": "@qcluffy/agent-bootstrap",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "OpenClaw Agent Bootstrap - 完整的 Agent 核心系统：记忆、情感、心跳、输入、认知、输出、引导",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
