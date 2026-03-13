@@ -1,0 +1,51 @@
+{
+  "id": "agent-bootstrap",
+  "name": "Agent Bootstrap",
+  "description": "完整的 Agent 核心系统：记忆、情感、心跳、输入、认知、输出、引导",
+  "version": "1.0.0",
+  "kind": "context-engine",
+  "package": "@qcluffy/agent-bootstrap",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "autoStart": {
+        "type": "boolean",
+        "default": true,
+        "description": "自动启动各系统"
+      },
+      "emotionEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "启用情感系统"
+      },
+      "memoryEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "启用记忆系统"
+      },
+      "bootstrapEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "启用引导系统"
+      },
+      "autoBootstrap": {
+        "type": "boolean",
+        "default": true,
+        "description": "用户首次对话时自动触发引导"
+      }
+    }
+  },
+  "hooks": [
+    "memory-system",
+    "emotion-system", 
+    "heartbeat-system",
+    "input-system",
+    "cognition-system",
+    "output-system",
+    "bootstrap-system",
+    "auto-bootstrap",
+    "agent-lifecycle"
+  ],
+  "skills": []
+}

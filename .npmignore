@@ -1,0 +1,30 @@
+# TypeScript 源码（已编译到 dist）
+src/
+test.ts
+tsconfig.json
+
+# 开发依赖
+node_modules/
+*.ts
+
+# Python 脚本（可选，用于独立运行）
+*.py
+cli.py
+health_check.py
+openclaw agent.py
+status_panel.py
+install.sh
+
+# 文档
+DESIGN.md
+REFACTORING_PLAN.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+*.log

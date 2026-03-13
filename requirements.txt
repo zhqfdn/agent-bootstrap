@@ -1,0 +1,11 @@
+# OpenClaw Agent System - Python Dependencies
+# Lock file for reproducible environments
+
+# Core dependencies
+PyYAML>=6.0,<7.0
+
+# Optional: Enhanced JSON handling
+# ujson>=1.35  # Fast JSON (uncomment if needed)
+
+# Optional: Better datetime handling
+# python-dateutil>=2.8.0  # (uncomment if needed)

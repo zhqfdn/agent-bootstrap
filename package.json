@@ -1,0 +1,30 @@
+{
+  "name": "@qcluffy/agent-bootstrap",
+  "version": "1.0.0",
+  "description": "OpenClaw Agent Bootstrap - 完整的 Agent 核心系统：记忆、情感、心跳、输入、认知、输出、引导",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node dist/test.js",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openclaw",
+    "agent",
+    "ai",
+    "bootstrap",
+    "agent-system"
+  ],
+  "author": "qcluffy",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qcluffy/agent-bootstrap"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "typescript": "^5.9.3"
+  }
+}
