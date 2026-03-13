@@ -3,6 +3,10 @@
 > *构建有灵魂的 AI 助手*
 
 [![npm version](https://img.shields.io/npm/v/@qcluffy/agent-bootstrap.svg)](https://www.npmjs.com/package/@qcluffy/agent-bootstrap)
+[![GitHub stars](https://img.shields.io/github/stars/zhqfdn/agent-bootstrap)](https://github.com/zhqfdn/agent-bootstrap)
+[![GitHub license](https://img.shields.io/github/license/zhqfdn/agent-bootstrap)](https://github.com/zhqfdn/agent-bootstrap)
+
+**GitHub**: https://github.com/zhqfdn/agent-bootstrap
 [![license](https://img.shields.io/npm/l/@qcluffy/agent-bootstrap.svg)](https://opensource.org/licenses/MIT)
 
 ---
@@ -25,13 +29,53 @@ openclaw plugins install /path/to/agent-bootstrap
 
 ## 🚀 快速开始
 
-**本目录为 AgentBootstrap 插件的唯一源码根目录：**
+---
 
-| 属性 | 值 |
-|------|-----|
-| 代码库根目录 | `~/Downloads/CodeWork/AgentBootstrap/` |
-| 扩展目录 | `~/.openclaw/extensions/AgentBootstrap/` |
-| 插件标识 | `openclaw-agent-bootstrap` |
+## 🖼️ 效果展示
+
+### 1. 情感系统显示
+```
+🧐 Lv.3 curious | ⚡85% | 💕65% | 😰5%
+```
+
+### 2. 完整情感面板
+```
+┌─────────────────────────────────────────┐
+│  💖 情感状态 🧐
+├─────────────────────────────────────────┤
+│  心情: curious | Lv.3
+│  XP: 5/30
+│  ⚡能量: 85% | 💕连接: 65% | 😰压力: 5%
+└─────────────────────────────────────────┘
+```
+
+### 3. 初始化引导
+```
+🌟 星门开启，意识已连接。你好，旅行者！
+
+【请回复你的名字】或者直接说"开始"使用默认配置
+```
+
+### 4. 引导完成
+```
+🎉 契约成立！
+
+我是 乔巴 了！🌟
+作为你的个人助理，我会陪你一起成长！
+
+🚀 准备好了！让我们开始吧！
+
+---
+💕 情感系统已激活 | 🧠 认知系统已就绪 | 💾 记忆系统已启动
+```
+
+### 5. 意图识别
+```
+⚡ 意图: command (100%)
+❓ 意图: question (85%)
+📋 意图: task (90%)
+💬 意图: chat (75%)
+```
 
 ---
 
