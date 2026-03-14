@@ -11,7 +11,7 @@ const pluginDir = __dirname;
 
 // 配置 - 指向 dist/systems
 const CONFIG = {
-  outputSystemPath: path.join(pluginDir, 'dist', 'systems'),
+  outputSystemPath: path.join(pluginDir, '..', '..', 'dist', 'systems'),
 };
 
 /**

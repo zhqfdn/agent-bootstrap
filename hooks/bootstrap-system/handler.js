@@ -12,7 +12,7 @@ const pluginDir = __dirname;
 
 // 配置 - 指向 dist/systems
 const CONFIG = {
-  bootstrapSystemPath: path.join(pluginDir, 'dist', 'systems'),
+  bootstrapSystemPath: path.join(pluginDir, '..', '..', 'dist', 'systems'),
 };
 
 /**

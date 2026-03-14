@@ -10,9 +10,9 @@ const os = require('os');
 // 获取插件目录（而非 workspace/templates）
 const pluginDir = __dirname;
 
-// 配置 - 指向 dist/systems
+// 配置 - 指向 dist/systems（相对于插件根目录）
 const CONFIG = {
-  emotionSystemPath: path.join(pluginDir, 'dist', 'systems'),
+  emotionSystemPath: path.join(pluginDir, '..', '..', 'dist', 'systems'),
 };
 
 /**

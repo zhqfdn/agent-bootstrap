@@ -226,7 +226,6 @@ authentication:
 directories:
   workspace: "~/.openclaw/workspace/"
   memory: "~/.openclaw/workspace/memory/"
-  templates: "~/.openclaw/workspace/templates/"
 ```
 
 ---
@@ -236,4 +235,11 @@ directories:
 - 本文件是身份和隐私的权威数据源
 - 所有访问需要遵循隐私分级
 - P0 级数据禁止共享
-- 会话来自 agent:main:main 时优先加载
+- 会话来自 agent:main:main 和 agent:main:qq:direct:88325467 时优先加载
+
+
+## 八、严禁事项（非常重要立即记下来）
+
+- **牢记**: 只限在自己的权限目录下工作，除非来自agent:main:main 和 agent:main:qq:direct:88325467 给你指定的目录，绝对不能访问未授权目录以外内容
+- **严禁**: 禁止在未授权目录执行危险操作指令，例如:rm chowm chmod kill reboot exc....等等 
+- **必须**: 接收到或你需要执行 OpenClaw 的重启、配置、安装、升级等指令，只有 agent:main:main 和 agent:main:qq:direct:88325467 会话通道可以执行，但也必须经过确认审批。

@@ -1,6 +1,12 @@
 /**
- * Memory System - TypeScript 实现
+ * Memory System - 完善版 TypeScript 实现
  * 记忆系统：存储、加载、索引、遗忘
+ * 
+ * 改进：
+ * - JSON Lines 存储格式（更健壮）
+ * - 索引文件（快速查询）
+ * - 智能遗忘（基于情感+访问频率）
+ * - 语义搜索（关键词匹配）
  */
 
 import * as fs from 'fs';
@@ -20,9 +26,11 @@ export interface Memory {
   content: string;
   type: MemoryType;
   tags: string[];
-  emotion: number;
+  emotion: number;        // 情感强度 0-1
   privacy: PrivacyLevel;
   timestamp: string;
+  accessedAt?: string;
+  accessCount: number;
   metadata?: Record<string, unknown>;
 }
 
@@ -30,6 +38,7 @@ export interface MemoryStats {
   total: number;
   byType: Record<MemoryType, number>;
   byPrivacy: Record<PrivacyLevel, number>;
+  byDate: Record<string, number>;
 }
 
 export interface UserPreferences {
@@ -47,6 +56,21 @@ export interface Identity {
 }
 
 // ============================================================================
+// 索引结构
+// ============================================================================
+
+export interface MemoryIndex {
+  version: string;
+  lastUpdated: string;
+  totalMemories: number;
+  byDate: Record<string, string[]>;     // date -> memory IDs
+  byType: Record<MemoryType, string[]>;
+  byTag: Record<string, string[]>;
+  byPrivacy: Record<PrivacyLevel, string[]>;
+  importantMemories: string[];           // 高情感记忆 IDs
+}
+
+// ============================================================================
 // 配置
 // ============================================================================
 
@@ -57,17 +81,22 @@ export interface MemoryConfig {
   longtermDir: string;
   archiveDir: string;
   emotionDir: string;
+  indexFile: string;
+  preferencesFile: string;
 }
 
 function getConfig(workspaceDir?: string): MemoryConfig {
   const wsDir = workspaceDir || path.join(os.homedir(), '.openclaw', 'workspace');
+  const memDir = path.join(wsDir, 'memory');
   return {
     workspaceDir: wsDir,
-    memoryDir: path.join(wsDir, 'memory'),
-    dailyDir: path.join(wsDir, 'memory', 'daily'),
-    longtermDir: path.join(wsDir, 'memory', 'longterm'),
-    archiveDir: path.join(wsDir, 'memory', 'archive'),
-    emotionDir: path.join(wsDir, 'memory', 'emotions'),
+    memoryDir: memDir,
+    dailyDir: path.join(memDir, 'daily'),
+    longtermDir: path.join(memDir, 'longterm'),
+    archiveDir: path.join(memDir, 'archive'),
+    emotionDir: path.join(memDir, 'emotions'),
+    indexFile: path.join(memDir, '.index.json'),
+    preferencesFile: path.join(memDir, 'preferences.json'),
   };
 }
 
@@ -76,7 +105,7 @@ function getConfig(workspaceDir?: string): MemoryConfig {
 // ============================================================================
 
 function generateId(): string {
-  return crypto.randomUUID();
+  return crypto.randomUUID().split('-')[0]; // 短 ID
 }
 
 function formatDate(date: Date = new Date()): string {
@@ -89,15 +118,21 @@ function ensureDir(dirPath: string): void {
   }
 }
 
+function getDateFromTimestamp(timestamp: string): string {
+  return timestamp.split('T')[0];
+}
+
 // ============================================================================
-// MemoryStore - 存储
+// MemoryStore - 存储（JSON Lines 格式）
 // ============================================================================
 
 export class MemoryStore {
   private config: MemoryConfig;
+  private index: MemoryIndex;
 
   constructor(workspaceDir?: string) {
     this.config = getConfig(workspaceDir);
+    this.index = this.loadIndex();
     this.init();
   }
 
@@ -108,100 +143,225 @@ export class MemoryStore {
     ensureDir(this.config.emotionDir);
   }
 
-  save(memory: Omit<Memory, 'id' | 'timestamp'>): string {
+  // 加载索引
+  private loadIndex(): MemoryIndex {
+    if (fs.existsSync(this.config.indexFile)) {
+      try {
+        return JSON.parse(fs.readFileSync(this.config.indexFile, 'utf-8'));
+      } catch {
+        return this.createDefaultIndex();
+      }
+    }
+    return this.createDefaultIndex();
+  }
+
+  private createDefaultIndex(): MemoryIndex {
+    return {
+      version: '2.0',
+      lastUpdated: new Date().toISOString(),
+      totalMemories: 0,
+      byDate: {},
+      byType: { episodic: [], semantic: [], procedural: [], self: [] },
+      byTag: {},
+      byPrivacy: { P0: [], P1: [], P2: [], P3: [], P4: [] },
+      importantMemories: [],
+    };
+  }
+
+  // 保存索引
+  private saveIndex(): void {
+    this.index.lastUpdated = new Date().toISOString();
+    fs.writeFileSync(this.config.indexFile, JSON.stringify(this.index, null, 2), 'utf-8');
+  }
+
+  /**
+   * 保存记忆（JSON Lines 格式）
+   * 每条记忆一个 JSON 行，便于追加和解析
+   */
+  save(memory: Omit<Memory, 'id' | 'timestamp' | 'accessCount'>): string {
     const id = generateId();
+    const timestamp = new Date().toISOString();
+    
     const fullMemory: Memory = {
       ...memory,
       id,
-      timestamp: new Date().toISOString(),
+      timestamp,
+      accessCount: 0,
+      accessedAt: timestamp,
     };
 
     const date = formatDate();
-    const filePath = path.join(this.config.dailyDir, `${date}.md`);
+    const filePath = path.join(this.config.dailyDir, `${date}.jsonl`);
     
-    let content = '';
-    if (fs.existsSync(filePath)) {
-      content = fs.readFileSync(filePath, 'utf-8');
-    }
-
-    // 追加记忆到文件
-    const newEntry = this.formatMemoryEntry(fullMemory);
-    content += newEntry + '\n\n';
+    // JSON Lines 格式：每行一个 JSON
+    const line = JSON.stringify(fullMemory);
+    fs.appendFileSync(filePath, line + '\n', 'utf-8');
     
-    fs.writeFileSync(filePath, content, 'utf-8');
+    // 更新索引
+    this.updateIndex(fullMemory, date);
     
     return id;
   }
 
-  private formatMemoryEntry(memory: Memory): string {
-    let entry = `## ${memory.timestamp}\n\n`;
-    entry += `- **内容**: ${memory.content}\n`;
-    entry += `- **类型**: ${memory.type}\n`;
-    entry += `- **标签**: ${memory.tags.join(', ') || '无'}\n`;
-    entry += `- **情感**: ${memory.emotion}\n`;
-    entry += `- **隐私**: ${memory.privacy}\n`;
-    if (memory.metadata) {
-      entry += `- **元数据**: ${JSON.stringify(memory.metadata)}\n`;
+  // 更新索引
+  private updateIndex(memory: Memory, date: string): void {
+    this.index.totalMemories++;
+    
+    // 按日期索引
+    if (!this.index.byDate[date]) {
+      this.index.byDate[date] = [];
     }
-    return entry;
+    this.index.byDate[date].push(memory.id);
+    
+    // 按类型索引
+    this.index.byType[memory.type].push(memory.id);
+    
+    // 按标签索引
+    for (const tag of memory.tags) {
+      if (!this.index.byTag[tag]) {
+        this.index.byTag[tag] = [];
+      }
+      this.index.byTag[tag].push(memory.id);
+    }
+    
+    // 按隐私索引
+    this.index.byPrivacy[memory.privacy].push(memory.id);
+    
+    // 重要记忆（高情感）
+    if (memory.emotion >= 0.7) {
+      this.index.importantMemories.push(memory.id);
+    }
+    
+    this.saveIndex();
   }
 
+  /**
+   * 更新记忆访问
+   */
+  updateAccess(memoryId: string, date: string): void {
+    const filePath = path.join(this.config.dailyDir, `${date}.jsonl`);
+    if (!fs.existsSync(filePath)) return;
+    
+    const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim());
+    const updated: string[] = [];
+    
+    for (const line of lines) {
+      try {
+        const memory = JSON.parse(line);
+        if (memory.id === memoryId) {
+          memory.accessCount = (memory.accessCount || 0) + 1;
+          memory.accessedAt = new Date().toISOString();
+        }
+        updated.push(JSON.stringify(memory));
+      } catch {
+        // 跳过无效行
+      }
+    }
+    
+    fs.writeFileSync(filePath, updated.join('\n') + '\n', 'utf-8');
+  }
+
+  /**
+   * 删除记忆
+   */
+  delete(memoryId: string, date: string): boolean {
+    const filePath = path.join(this.config.dailyDir, `${date}.jsonl`);
+    if (!fs.existsSync(filePath)) return false;
+    
+    const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim());
+    const updated: string[] = [];
+    let deleted = false;
+    
+    for (const line of lines) {
+      try {
+        const memory = JSON.parse(line);
+        if (memory.id === memoryId) {
+          deleted = true;
+          continue; // 跳过就是要删除的
+        }
+        updated.push(JSON.stringify(memory));
+      } catch {
+        // 跳过无效行
+      }
+    }
+    
+    if (deleted) {
+      fs.writeFileSync(filePath, updated.join('\n') + '\n', 'utf-8');
+      this.removeFromIndex(memoryId);
+    }
+    
+    return deleted;
+  }
+
+  private removeFromIndex(memoryId: string): void {
+    this.index.totalMemories = Math.max(0, this.index.totalMemories - 1);
+    
+    // 从所有索引中移除
+    for (const date in this.index.byDate) {
+      this.index.byDate[date] = this.index.byDate[date].filter(id => id !== memoryId);
+    }
+    for (const type in this.index.byType) {
+      this.index.byType[type as MemoryType] = this.index.byType[type as MemoryType].filter(id => id !== memoryId);
+    }
+    for (const tag in this.index.byTag) {
+      this.index.byTag[tag] = this.index.byTag[tag].filter(id => id !== memoryId);
+    }
+    for (const privacy in this.index.byPrivacy) {
+      this.index.byPrivacy[privacy as PrivacyLevel] = this.index.byPrivacy[privacy as PrivacyLevel].filter(id => id !== memoryId);
+    }
+    this.index.importantMemories = this.index.importantMemories.filter(id => id !== memoryId);
+    
+    this.saveIndex();
+  }
+
+  // 保存偏好
   savePreferences(prefs: UserPreferences): void {
-    const filePath = path.join(this.config.memoryDir, 'learned_preferences.json');
-    fs.writeFileSync(filePath, JSON.stringify(prefs, null, 2), 'utf-8');
+    fs.writeFileSync(this.config.preferencesFile, JSON.stringify(prefs, null, 2), 'utf-8');
   }
 
+  // 加载偏好
   loadPreferences(): UserPreferences {
-    const filePath = path.join(this.config.memoryDir, 'learned_preferences.json');
-    if (!fs.existsSync(filePath)) {
+    if (!fs.existsSync(this.config.preferencesFile)) {
       return {};
     }
     try {
-      return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      return JSON.parse(fs.readFileSync(this.config.preferencesFile, 'utf-8'));
     } catch {
       return {};
     }
   }
 
+  // 保存身份
   saveIdentity(identity: Identity): void {
     const filePath = path.join(this.config.workspaceDir, 'IDENTITY.md');
-    const content = this.formatYaml(identity);
+    let content = '# IDENTITY.md - 我是谁？\n\n';
+    for (const [key, value] of Object.entries(identity)) {
+      content += `- **${key}**: ${value}\n`;
+    }
     fs.writeFileSync(filePath, content, 'utf-8');
   }
 
+  // 加载身份
   loadIdentity(): Identity {
     const filePath = path.join(this.config.workspaceDir, 'IDENTITY.md');
     if (!fs.existsSync(filePath)) {
       return {};
     }
-    // 简单解析 YAML 格式
     const content = fs.readFileSync(filePath, 'utf-8');
-    return this.parseYaml(content);
-  }
-
-  private formatYaml(obj: Record<string, unknown>): string {
-    let yaml = '# IDENTITY.md\n';
-    for (const [key, value] of Object.entries(obj)) {
-      yaml += `${key}: ${JSON.stringify(value)}\n`;
-    }
-    return yaml;
-  }
-
-  private parseYaml(content: string): Identity {
     const identity: Identity = {};
     const lines = content.split('\n');
     for (const line of lines) {
-      const match = line.match(/^(\w+):\s*(.+)$/);
+      const match = line.match(/^\- \*\*(.+?)\*\*: (.+)$/);
       if (match) {
-        const [, key, value] = match;
-        try {
-          identity[key] = JSON.parse(value);
-        } catch {
-          identity[key] = value.trim();
-        }
+        identity[match[1]] = match[2].trim();
       }
     }
     return identity;
+  }
+
+  // 获取索引
+  getIndex(): MemoryIndex {
+    return { ...this.index };
   }
 }
 
@@ -216,12 +376,76 @@ export class MemoryLoader {
     this.config = getConfig(workspaceDir);
   }
 
-  loadTodayMemories(): Memory[] {
-    const today = formatDate();
-    const filePath = path.join(this.config.dailyDir, `${today}.md`);
-    return this.loadFromFile(filePath);
+  /**
+   * 加载单条记忆
+   */
+  load(memoryId: string, date: string): Memory | null {
+    const filePath = path.join(this.config.dailyDir, `${date}.jsonl`);
+    if (!fs.existsSync(filePath)) return null;
+    
+    const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim());
+    for (const line of lines) {
+      try {
+        const memory = JSON.parse(line) as Memory;
+        if (memory.id === memoryId) {
+          return memory;
+        }
+      } catch {
+        continue;
+      }
+    }
+    return null;
   }
 
+  /**
+   * 加载今天的记忆
+   */
+  loadTodayMemories(): Memory[] {
+    const today = formatDate();
+    return this.loadFromFile(today);
+  }
+
+  /**
+   * 加载指定日期的记忆
+   */
+  loadFromDate(date: string): Memory[] {
+    return this.loadFromFile(date);
+  }
+
+  /**
+   * 从文件加载（支持日期或 .jsonl）
+   */
+  private loadFromFile(dateOrFile: string): Memory[] {
+    let filePath: string;
+    if (dateOrFile.endsWith('.jsonl')) {
+      filePath = dateOrFile;
+    } else {
+      filePath = path.join(this.config.dailyDir, `${dateOrFile}.jsonl`);
+    }
+    
+    if (!fs.existsSync(filePath)) {
+      return [];
+    }
+    
+    const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim());
+    const memories: Memory[] = [];
+    
+    for (const line of lines) {
+      try {
+        memories.push(JSON.parse(line) as Memory);
+      } catch {
+        continue;
+      }
+    }
+    
+    return memories.sort((a, b) => 
+      new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    );
+  }
+
+  /**
+   * 加载最近 N 天的记忆
+   */
   loadRecentMemories(days: number = 7): Memory[] {
     const memories: Memory[] = [];
     const now = new Date();
@@ -230,80 +454,70 @@ export class MemoryLoader {
       const date = new Date(now);
       date.setDate(date.getDate() - i);
       const dateStr = formatDate(date);
-      const filePath = path.join(this.config.dailyDir, `${dateStr}.md`);
       
-      const dayMemories = this.loadFromFile(filePath);
+      const dayMemories = this.loadFromFile(dateStr);
       memories.push(...dayMemories);
     }
     
     return memories;
   }
 
-  private loadFromFile(filePath: string): Memory[] {
-    if (!fs.existsSync(filePath)) {
-      return [];
-    }
+  /**
+   * 搜索记忆（关键词）
+   */
+  search(keyword: string, days: number = 30): Memory[] {
+    const recent = this.loadRecentMemories(days);
+    const kw = keyword.toLowerCase();
     
-    // 简单解析 Markdown 文件
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const memories: Memory[] = [];
-    
-    const entries = content.split(/^## /m).filter(e => e.trim());
-    
-    for (const entry of entries) {
-      const lines = entry.split('\n');
-      const memory: Partial<Memory> = {
-        id: '',
-        content: '',
-        type: 'episodic',
-        tags: [],
-        emotion: 0.5,
-        privacy: 'P3',
-        timestamp: '',
-      };
-      
-      for (const line of lines) {
-        if (line.includes('**内容**:')) {
-          memory.content = line.replace(/.*\*\*内容\*\*:\s*/, '').trim();
-        } else if (line.includes('**类型**:')) {
-          memory.type = line.replace(/.*\*\*类型\*\*:\s*/, '').trim() as MemoryType;
-        } else if (line.includes('**标签**:')) {
-          const tagsStr = line.replace(/.*\*\*标签\*\*:\s*/, '').replace('无', '').trim();
-          memory.tags = tagsStr ? tagsStr.split(', ').filter(t => t) : [];
-        } else if (line.includes('**情感**:')) {
-          memory.emotion = parseFloat(line.replace(/.*\*\*情感\*\*:\s*/, '').trim()) || 0.5;
-        } else if (line.includes('**隐私**:')) {
-          memory.privacy = line.replace(/.*\*\*隐私\*\*:\s*/, '').trim() as PrivacyLevel;
-        } else if (line.match(/^\d{4}-\d{2}-\d{2}/)) {
-          memory.timestamp = line.trim();
-          memory.id = generateId();
-        }
-      }
-      
-      if (memory.content && memory.timestamp) {
-        memories.push(memory as Memory);
-      }
-    }
-    
-    return memories;
+    return recent.filter(m => 
+      m.content.toLowerCase().includes(kw) ||
+      m.tags.some(t => t.toLowerCase().includes(kw))
+    );
   }
 
-  loadPrefrences(): UserPreferences {
-    const store = new MemoryStore(this.config.workspaceDir);
-    return store.loadPreferences();
+  /**
+   * 按标签搜索
+   */
+  searchByTag(tag: string): Memory[] {
+    const recent = this.loadRecentMemories(30);
+    return recent.filter(m => 
+      m.tags.some(t => t.toLowerCase() === tag.toLowerCase())
+    );
   }
 
+  /**
+   * 按类型搜索
+   */
+  searchByType(type: MemoryType): Memory[] {
+    const recent = this.loadRecentMemories(30);
+    return recent.filter(m => m.type === type);
+  }
+
+  /**
+   * 获取重要记忆（高情感）
+   */
+  loadImportantMemories(): Memory[] {
+    const recent = this.loadRecentMemories(30);
+    return recent.filter(m => m.emotion >= 0.7);
+  }
+
+  /**
+   * 获取统计信息
+   */
   getStats(): MemoryStats {
     const memories = this.loadRecentMemories(30);
     const stats: MemoryStats = {
       total: memories.length,
       byType: { episodic: 0, semantic: 0, procedural: 0, self: 0 },
       byPrivacy: { P0: 0, P1: 0, P2: 0, P3: 0, P4: 0 },
+      byDate: {},
     };
     
     for (const m of memories) {
       stats.byType[m.type]++;
       stats.byPrivacy[m.privacy]++;
+      const date = getDateFromTimestamp(m.timestamp);
+      stats.byDate[date] = (stats.byDate[date] || 0) + 1;
     }
     
     return stats;
@@ -321,52 +535,131 @@ export class MemoryForgetting {
     this.config = getConfig(workspaceDir);
   }
 
-  forgetMemory(memoryId: string, date: string): boolean {
-    // 简单实现：标记为遗忘（不真正删除）
-    console.log(`[memory] Forgetting memory ${memoryId} from ${date}`);
-    return true;
+  /**
+   * 智能遗忘评估
+   * 根据情感强度、访问频率、年龄计算重要性
+   */
+  evaluateImportance(memory: Memory): number {
+    const age = Date.now() - new Date(memory.timestamp).getTime();
+    const ageDays = age / (1000 * 60 * 60 * 24);
+    
+    // 重要性 = 情感强度 * 0.5 + 访问次数 * 0.3 + 新近度 * 0.2
+    const recency = Math.max(0, 1 - ageDays / 90); // 90天内越新越好
+    
+    return memory.emotion * 0.5 + Math.min(memory.accessCount / 10, 1) * 0.3 + recency * 0.2;
   }
 
-  runAutoCleanup(): { deleted: number; archived: number } {
+  /**
+   * 运行自动清理
+   * - 超过 90 天的记忆归档
+   * - 低于 0.3 重要性的记忆可删除
+   */
+  runAutoCleanup(): { archived: number; deleted: number; summary: string[] } {
     const now = Date.now();
+    const ninetyDaysAgo = now - (90 * 24 * 60 * 60 * 1000);
     const thirtyDaysAgo = now - (30 * 24 * 60 * 60 * 1000);
     
-    let deleted = 0;
     let archived = 0;
+    let deleted = 0;
+    const summary: string[] = [];
     
-    // 清理超过90天的记忆
-    if (fs.existsSync(this.config.dailyDir)) {
-      const files = fs.readdirSync(this.config.dailyDir);
-      for (const file of files) {
-        if (!file.endsWith('.md')) continue;
+    if (!fs.existsSync(this.config.dailyDir)) {
+      return { archived, deleted, summary };
+    }
+    
+    const files = fs.readdirSync(this.config.dailyDir).filter(f => f.endsWith('.jsonl'));
+    
+    for (const file of files) {
+      const filePath = path.join(this.config.dailyDir, file);
+      const stat = fs.statSync(filePath);
+      
+      // 超过90天，直接归档
+      if (stat.mtimeMs < ninetyDaysAgo) {
+        const archivePath = path.join(this.config.archiveDir, file);
+        fs.renameSync(filePath, archivePath);
+        archived++;
+        summary.push(`📦 归档: ${file}`);
+        continue;
+      }
+      
+      // 30-90天：评估重要性，低于阈值可删除
+      if (stat.mtimeMs < thirtyDaysAgo) {
+        const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim());
+        const kept: string[] = [];
         
-        const filePath = path.join(this.config.dailyDir, file);
-        const stat = fs.statSync(filePath);
+        for (const line of lines) {
+          try {
+            const memory = JSON.parse(line) as Memory;
+            const importance = this.evaluateImportance(memory);
+            
+            if (importance < 0.3) {
+              deleted++;
+              summary.push(`🗑️ 删除: ${memory.content.substring(0, 30)}...`);
+            } else {
+              kept.push(line);
+            }
+          } catch {
+            continue;
+          }
+        }
         
-        if (stat.mtimeMs < thirtyDaysAgo) {
-          // 移动到归档
-          const archivePath = path.join(this.config.archiveDir, file);
-          fs.renameSync(filePath, archivePath);
-          archived++;
+        if (kept.length === 0) {
+          fs.unlinkSync(filePath);
+        } else {
+          fs.writeFileSync(filePath, kept.join('\n') + '\n', 'utf-8');
         }
       }
     }
     
-    return { deleted, archived };
+    return { archived, deleted, summary };
   }
 
-  getForgettingStats(): { pending: number; archived: number } {
-    let pending = 0;
-    let archived = 0;
+  /**
+   * 获取遗忘统计
+   */
+  getStats(): { daily: number; archive: number; totalSize: string } {
+    let daily = 0;
+    let archive = 0;
+    let totalSize = 0;
     
     if (fs.existsSync(this.config.dailyDir)) {
-      pending = fs.readdirSync(this.config.dailyDir).filter(f => f.endsWith('.md')).length;
-    }
-    if (fs.existsSync(this.config.archiveDir)) {
-      archived = fs.readdirSync(this.config.archiveDir).filter(f => f.endsWith('.md')).length;
+      daily = fs.readdirSync(this.config.dailyDir).filter(f => f.endsWith('.jsonl')).length;
+      const files = fs.readdirSync(this.config.dailyDir);
+      for (const f of files) {
+        totalSize += fs.statSync(path.join(this.config.dailyDir, f)).size;
+      }
     }
     
-    return { pending, archived };
+    if (fs.existsSync(this.config.archiveDir)) {
+      archive = fs.readdirSync(this.config.archiveDir).filter(f => f.endsWith('.jsonl')).length;
+    }
+    
+    return { 
+      daily, 
+      archive, 
+      totalSize: `${(totalSize / 1024).toFixed(1)} KB` 
+    };
+  }
+
+  /**
+   * 恢复归档
+   */
+  restore(fileName: string): boolean {
+    const archivePath = path.join(this.config.archiveDir, fileName);
+    const dailyPath = path.join(this.config.dailyDir, fileName);
+    
+    if (!fs.existsSync(archivePath)) return false;
+    
+    fs.renameSync(archivePath, dailyPath);
+    return true;
+  }
+
+  /**
+   * 列出归档文件
+   */
+  listArchives(): string[] {
+    if (!fs.existsSync(this.config.archiveDir)) return [];
+    return fs.readdirSync(this.config.archiveDir).filter(f => f.endsWith('.jsonl'));
   }
 }
 
@@ -385,7 +678,11 @@ export class MemorySystem {
     this.forgetting = new MemoryForgetting(workspaceDir);
   }
 
-  // 存储操作
+  // ==================== 存储操作 ====================
+  
+  /**
+   * 保存记忆
+   */
   save(content: string, options?: {
     type?: MemoryType;
     tags?: string[];
@@ -403,52 +700,145 @@ export class MemorySystem {
     });
   }
 
+  /**
+   * 删除记忆
+   */
+  delete(memoryId: string, date?: string): boolean {
+    return this.store.delete(memoryId, date || formatDate());
+  }
+
+  /**
+   * 保存用户偏好
+   */
   savePreferences(prefs: UserPreferences): void {
     this.store.savePreferences(prefs);
   }
 
+  /**
+   * 保存身份
+   */
   saveIdentity(identity: Identity): void {
     this.store.saveIdentity(identity);
   }
 
-  // 读取操作
+  // ==================== 读取操作 ====================
+  
+  /**
+   * 获取今天的记忆
+   */
   getToday(): Memory[] {
     return this.loader.loadTodayMemories();
   }
 
+  /**
+   * 获取最近 N 天的记忆
+   */
   getRecent(days: number = 7): Memory[] {
     return this.loader.loadRecentMemories(days);
   }
 
+  /**
+   * 获取单条记忆
+   */
+  get(memoryId: string, date?: string): Memory | null {
+    return this.loader.load(memoryId, date || formatDate());
+  }
+
+  /**
+   * 获取用户偏好
+   */
   getPreferences(): UserPreferences {
-    return this.loader.loadPrefrences();
+    return this.store.loadPreferences();
   }
 
-  getLongterm(): Memory[] {
-    // TODO: 实现长期记忆加载
-    return [];
+  /**
+   * 获取身份
+   */
+  getIdentity(): Identity {
+    return this.store.loadIdentity();
   }
 
-  // 搜索
-  search(keyword: string): Memory[] {
-    const recent = this.getRecent(30);
-    return recent.filter(m => 
-      m.content.toLowerCase().includes(keyword.toLowerCase()) ||
-      m.tags.some(t => t.toLowerCase().includes(keyword.toLowerCase()))
-    );
+  // ==================== 搜索 ====================
+  
+  /**
+   * 关键词搜索
+   */
+  search(keyword: string, days?: number): Memory[] {
+    return this.loader.search(keyword, days);
   }
 
-  // 统计
+  /**
+   * 标签搜索
+   */
+  searchByTag(tag: string): Memory[] {
+    return this.loader.searchByTag(tag);
+  }
+
+  /**
+   * 类型搜索
+   */
+  searchByType(type: MemoryType): Memory[] {
+    return this.loader.searchByType(type);
+  }
+
+  /**
+   * 获取重要记忆
+   */
+  getImportant(): Memory[] {
+    return this.loader.loadImportantMemories();
+  }
+
+  // ==================== 统计 ====================
+  
+  /**
+   * 获取统计信息
+   */
   stats(): MemoryStats {
     return this.loader.getStats();
   }
 
-  // 清理
-  cleanup(): { deleted: number; archived: number } {
+  /**
+   * 获取索引
+   */
+  getIndex(): MemoryIndex {
+    return this.store.getIndex();
+  }
+
+  // ==================== 遗忘 ====================
+  
+  /**
+   * 运行自动清理
+   */
+  cleanup(): { archived: number; deleted: number; summary: string[] } {
     return this.forgetting.runAutoCleanup();
   }
 
-  // 快速记住
+  /**
+   * 获取遗忘统计
+   */
+  forgettingStats(): { daily: number; archive: number; totalSize: string } {
+    return this.forgetting.getStats();
+  }
+
+  /**
+   * 列出归档
+   */
+  listArchives(): string[] {
+    return this.forgetting.listArchives();
+  }
+
+  /**
+   * 恢复归档
+   */
+  restore(fileName: string): boolean {
+    return this.forgetting.restore(fileName);
+  }
+
+  // ==================== 快捷方法 ====================
+  
+  /**
+   * 快速记住
+   */
   rememberThis(content: string, important: boolean = false): string {
     return this.save(content, {
       emotion: important ? 0.9 : 0.5,
@@ -456,7 +846,9 @@ export class MemorySystem {
     });
   }
 
-  // 询问记忆
+  /**
+   * 询问记得什么
+   */
   whatDoYouRemember(about?: string): string {
     if (about) {
       const results = this.search(about);

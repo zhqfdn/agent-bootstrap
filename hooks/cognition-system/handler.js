@@ -11,7 +11,7 @@ const pluginDir = __dirname;
 
 // 配置 - 指向 dist/systems
 const CONFIG = {
-  cognitionSystemPath: path.join(pluginDir, 'dist', 'systems'),
+  cognitionSystemPath: path.join(pluginDir, '..', '..', 'dist', 'systems'),
 };
 
 /**

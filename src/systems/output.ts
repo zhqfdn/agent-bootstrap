@@ -1,7 +1,21 @@
 /**
- * Output System - 输出系统 (TypeScript 版)
- * 回复生成与行动执行
+ * Output System - 完善版输出系统 (TypeScript)
+ * 
+ * 改进：
+ * - 用户偏好适配
+ * - 上下文感知回复
+ * - 多格式输出
+ * - 行动执行器增强
+ * - 错误处理与恢复
  */
+
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+
+// ============================================================================
+// 类型定义
+// ============================================================================
 
 // 输出格式
 export type OutputFormat = 'text' | 'markdown' | 'code' | 'json' | 'table' | 'list';
@@ -15,263 +29,553 @@ export interface OutputContent {
   style: OutputStyle;
   content: string;
   metadata: Record<string, unknown>;
+  needsConfirmation?: boolean;
+  confirmPrompt?: string;
 }
 
+// 用户偏好
+export interface UserPreferences {
+  style: OutputStyle;
+  detailLevel: 'low' | 'medium' | 'high';
+  useEmoji: boolean;
+  useMarkdown: boolean;
+}
+
+// 执行结果
+export interface ExecutionResult {
+  success: boolean;
+  data?: unknown;
+  error?: string;
+  message?: string;
+}
+
+// 行动定义
+export interface Action {
+  name: string;
+  description: string;
+  params: Record<string, { required: boolean; type: string; description?: string }>;
+  execute: (params: Record<string, unknown>) => Promise<ExecutionResult>;
+}
+
+// ============================================================================
+// 配置
+// ============================================================================
+
+interface OutputConfig {
+  workspaceDir: string;
+  preferencesFile: string;
+}
+
+function getConfig(workspaceDir?: string): OutputConfig {
+  const wsDir = workspaceDir || path.join(os.homedir(), '.openclaw', 'workspace');
+  return {
+    workspaceDir: wsDir,
+    preferencesFile: path.join(wsDir, 'memory', 'output_preferences.json'),
+  };
+}
+
+// ============================================================================
 // 回复模板
-const RESPONSE_TEMPLATES: Record<OutputStyle, Record<string, string>> = {
+// ============================================================================
+
+const STYLE_TEMPLATES: Record<OutputStyle, Record<string, (params: Record<string, string>) => string>> = {
   direct: {
-    greeting: '{greeting}',
-    result: '{result}',
-    error: '错误: {error}',
-    confirm: '完成',
+    greeting: (p) => p.name ? `你好，${p.name}` : '你好',
+    result: (p) => p.content,
+    error: (p) => `错误: ${p.message}`,
+    success: (p) => p.message || '完成',
+    confirm: (p) => `${p.question} (是/否)`,
+    notFound: (p) => `未找到: ${p.target}`,
+    loading: (p) => `处理中...`,
   },
   friendly: {
-    greeting: '你好呀！{greeting}',
-    result: '搞定啦！{result}',
-    error: '哎呀，出错了... {error}',
-    confirm: '好的，已经完成了～',
+    greeting: (p) => p.name ? `你好呀，${p.name}！✨` : '你好呀！✨',
+    result: (p) => `搞定啦！🎉 ${p.content}`,
+    error: (p) => `哎呀，出错了... 😢 ${p.message}`,
+    success: (p) => `完成啦！✅ ${p.message || ''}`,
+    confirm: (p) => `${p.question} \n请回复「是」或「否」~`,
+    notFound: (p) => `没找到「${p.target}」呢... 🔍`,
+    loading: (p) => `稍等一下哦... ⏳`,
   },
   formal: {
-    greeting: '您好。{greeting}',
-    result: '已完成：{result}',
-    error: '错误：{error}',
-    confirm: '已确认',
+    greeting: (p) => p.name ? `您好，${p.name}` : '您好',
+    result: (p) => `已完成：${p.content}`,
+    error: (p) => `错误：${p.message}`,
+    success: (p) => `成功：${p.message || '操作完成'}`,
+    confirm: (p) => `${p.question}\n\n请确认（是/否）`,
+    notFound: (p) => `未找到目标：${p.target}`,
+    loading: (p) => '处理中...',
   },
   casual: {
-    greeting: '嘿！{greeting}',
-    result: '好了～ {result}',
-    error: '呃... {error}',
-    confirm: 'OK！',
+    greeting: (p) => p.name ? `嘿，${p.name}！` : '嘿！',
+    result: (p) => `好了～ ${p.content}`,
+    error: (p) => `呃... ${p.message}`,
+    success: (p) => `OK！${p.message || ''}`,
+    confirm: (p) => `${p.question}\n(是/否)`,
+    notFound: (p) => `${p.target} 没找到`,
+    loading: (p) => '...',
   },
   technical: {
-    greeting: '[System] {greeting}',
-    result: '[Result] {result}',
-    error: '[Error] {error}',
-    confirm: '[Confirmed]',
+    greeting: (p) => `[System] ${p.name ? `User: ${p.name}` : 'Ready'}`,
+    result: (p) => `[Result] ${p.content}`,
+    error: (p) => `[Error] ${p.message}`,
+    success: (p) => `[Success] ${p.message || 'Done'}`,
+    confirm: (p) => `[Confirm] ${p.question}`,
+    notFound: (p) => `[Not Found] ${p.target || ''}`,
+    loading: (p) => '[Processing...]',
   },
 };
 
+// ============================================================================
 // 回复生成器
-export class ResponseGenerator {
-  // 生成回复
-  generate(content: string, style: OutputStyle = 'friendly', templateType: string = 'result'): string {
-    const templates = RESPONSE_TEMPLATES[style] || RESPONSE_TEMPLATES.friendly;
-    const template = templates[templateType] || '{content}';
-    return template.replace(/\{(\w+)\}/g, (_, key) => {
-      if (key === 'content') return content;
-      return content; // 默认返回内容
+// ============================================================================
+
+class ResponseGenerator {
+  private preferences: UserPreferences;
+  private config: OutputConfig;
+  
+  constructor(workspaceDir?: string) {
+    this.config = getConfig(workspaceDir);
+    this.preferences = this.loadPreferences();
+  }
+  
+  private loadPreferences(): UserPreferences {
+    try {
+      if (fs.existsSync(this.config.preferencesFile)) {
+        return JSON.parse(fs.readFileSync(this.config.preferencesFile, 'utf-8'));
+      }
+    } catch {
+      // 忽略
+    }
+    return this.getDefaultPreferences();
+  }
+  
+  private getDefaultPreferences(): UserPreferences {
+    return {
+      style: 'friendly',
+      detailLevel: 'medium',
+      useEmoji: true,
+      useMarkdown: true,
+    };
+  }
+  
+  private savePreferences(): void {
+    const dir = path.dirname(this.config.preferencesFile);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(this.config.preferencesFile, JSON.stringify(this.preferences, null, 2));
+  }
+  
+  /**
+   * 设置用户偏好
+   */
+  setPreferences(prefs: Partial<UserPreferences>): void {
+    this.preferences = { ...this.preferences, ...prefs };
+    this.savePreferences();
+  }
+  
+  /**
+   * 获取用户偏好
+   */
+  getPreferences(): UserPreferences {
+    return { ...this.preferences };
+  }
+  
+  /**
+   * 生成回复
+   */
+  generate(
+    content: string,
+    templateType: string = 'result',
+    style?: OutputStyle,
+    params?: Record<string, string>
+  ): string {
+    const s = style || this.preferences.style;
+    const templates = STYLE_TEMPLATES[s] || STYLE_TEMPLATES.friendly;
+    const template = templates[templateType] || ((p: Record<string, string>) => p.content || '');
+    
+    return template({ content, ...params });
+  }
+  
+  /**
+   * 格式化内容
+   */
+  format(content: unknown, format: OutputFormat): string {
+    switch (format) {
+      case 'json':
+        return JSON.stringify(content, null, 2);
+      
+      case 'table':
+        if (Array.isArray(content) && content.length > 0) {
+          return this.formatAsTable(content);
+        }
+        return String(content);
+      
+      case 'list':
+        if (Array.isArray(content)) {
+          return content.map((item, i) => `${i + 1}. ${item}`).join('\n');
+        }
+        return String(content);
+      
+      case 'code':
+        const code = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+        return `\`\`\`\n${code}\n\`\`\``;
+      
+      case 'markdown':
+        return this.formatAsMarkdown(content);
+      
+      default:
+        return String(content);
+    }
+  }
+  
+  private formatAsTable(data: unknown[]): string {
+    if (!Array.isArray(data)) return String(data);
+    if (data.length === 0) return '空';
+    
+    const rows = data.map(item => {
+      if (typeof item === 'object' && item !== null) {
+        return Object.values(item).map(v => String(v));
+      }
+      return [String(item)];
+    });
+    
+    const colWidths: number[] = [];
+    for (const row of rows) {
+      row.forEach((cell, i) => {
+        colWidths[i] = Math.max(colWidths[i] || 0, cell.length);
+      });
+    }
+    
+    return rows.map(row => 
+      '| ' + row.map((cell, i) => cell.padEnd(colWidths[i])).join(' | ') + ' |'
+    ).join('\n');
+  }
+  
+  private formatAsMarkdown(content: unknown): string {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content.map(item => `- ${typeof item === 'object' ? JSON.stringify(item) : item}`).join('\n');
+    }
+    if (typeof content === 'object' && content !== null) {
+      return Object.entries(content)
+        .map(([k, v]) => `**${k}**: ${v}`)
+        .join('\n');
+    }
+    return String(content);
+  }
+}
+
+// ============================================================================
+// 行动执行器
+// ============================================================================
+
+class ActionExecutor {
+  private actions: Map<string, Action> = new Map();
+  
+  constructor() {
+    this.registerDefaultActions();
+  }
+  
+  private registerDefaultActions(): void {
+    // 文件读取
+    this.register({
+      name: 'file.read',
+      description: '读取文件内容',
+      params: { path: { required: true, type: 'string', description: '文件路径' } },
+      execute: async (params) => {
+        const filePath = params.path as string;
+        if (!filePath) return { success: false, error: '缺少文件路径' };
+        
+        try {
+          if (!fs.existsSync(filePath)) {
+            return { success: false, error: '文件不存在' };
+          }
+          const content = fs.readFileSync(filePath, 'utf-8');
+          return { success: true, data: content };
+        } catch (e) {
+          return { success: false, error: String(e) };
+        }
+      },
+    });
+    
+    // 文件写入
+    this.register({
+      name: 'file.write',
+      description: '写入文件',
+      params: { 
+        path: { required: true, type: 'string', description: '文件路径' },
+        content: { required: true, type: 'string', description: '文件内容' },
+      },
+      execute: async (params) => {
+        const filePath = params.path as string;
+        const content = params.content as string;
+        
+        if (!filePath) return { success: false, error: '缺少文件路径' };
+        
+        try {
+          const dir = path.dirname(filePath);
+          if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+          }
+          fs.writeFileSync(filePath, content || '', 'utf-8');
+          return { success: true, message: '文件已写入' };
+        } catch (e) {
+          return { success: false, error: String(e) };
+        }
+      },
+    });
+    
+    // 文件删除
+    this.register({
+      name: 'file.delete',
+      description: '删除文件',
+      params: { path: { required: true, type: 'string', description: '文件路径' } },
+      execute: async (params) => {
+        const filePath = params.path as string;
+        if (!filePath) return { success: false, error: '缺少文件路径' };
+        
+        try {
+          if (!fs.existsSync(filePath)) {
+            return { success: false, error: '文件不存在' };
+          }
+          fs.unlinkSync(filePath);
+          return { success: true, message: '文件已删除' };
+        } catch (e) {
+          return { success: false, error: String(e) };
+        }
+      },
+    });
+    
+    // 目录列表
+    this.register({
+      name: 'dir.list',
+      description: '列出目录内容',
+      params: { path: { required: false, type: 'string', description: '目录路径' } },
+      execute: async (params) => {
+        const dirPath = params.path as string || os.homedir();
+        
+        try {
+          const items = fs.readdirSync(dirPath);
+          return { success: true, data: items };
+        } catch (e) {
+          return { success: false, error: String(e) };
+        }
+      },
     });
   }
   
-  // 格式化代码
-  formatCode(code: string, language: string = ''): string {
-    return `\`\`\`${language}\n${code}\n\`\`\``;
+  /**
+   * 注册行动
+   */
+  register(action: Action): void {
+    this.actions.set(action.name, action);
   }
   
-  // 格式化列表
-  formatList(items: string[], numbered: boolean = false): string {
-    return items.map((item, i) => numbered ? `${i + 1}. ${item}` : `• ${item}`).join('\n');
-  }
-  
-  // 格式化表格
-  formatTable(headers: string[], rows: string[][]): string {
-    const colWidths = headers.map((h, i) => 
-      Math.max(h.length, ...rows.map(r => (r[i] || '').length))
-    );
+  /**
+   * 执行行动
+   */
+  async execute(actionName: string, params: Record<string, unknown> = {}): Promise<ExecutionResult> {
+    const action = this.actions.get(actionName);
+    if (!action) {
+      return { success: false, error: `未知行动: ${actionName}` };
+    }
     
-    const formatRow = (cells: string[]) => 
-      '| ' + cells.map((c, i) => c.padEnd(colWidths[i])).join(' | ') + ' |';
-    
-    return [
-      formatRow(headers),
-      '|-' + colWidths.map(w => '-'.repeat(w)).join('-|-') + '-|',
-      ...rows.map(formatRow),
-    ].join('\n');
-  }
-}
-
-// 行动执行器
-export class ActionExecutor {
-  private executors: Record<string, (params: Record<string, unknown>) => { success: boolean; error?: string; data?: unknown }> = {};
-  
-  constructor() {
-    this.registerDefaultExecutors();
-  }
-  
-  private registerDefaultExecutors(): void {
-    // 文件操作
-    this.executors['file.write'] = this.fileWrite.bind(this);
-    this.executors['file.read'] = this.fileRead.bind(this);
-    this.executors['file.delete'] = this.fileDelete.bind(this);
-  }
-  
-  private fileWrite(params: Record<string, unknown>): { success: boolean; error?: string } {
-    const fs = require('fs');
-    const path = require('path');
-    
-    const filePath = params.path as string;
-    const content = params.content as string;
-    
-    if (!filePath) return { success: false, error: '缺少路径' };
-    
-    try {
-      const dir = path.dirname(filePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+    // 验证必填参数
+    for (const [paramName, schema] of Object.entries(action.params)) {
+      if (schema.required && !params[paramName]) {
+        return { success: false, error: `缺少必填参数: ${paramName}` };
       }
-      fs.writeFileSync(filePath, content || '');
-      return { success: true };
-    } catch (e: unknown) {
-      return { success: false, error: String(e) };
     }
-  }
-  
-  private fileRead(params: Record<string, unknown>): { success: boolean; error?: string; data?: string } {
-    const fs = require('fs');
-    
-    const filePath = params.path as string;
-    if (!filePath) return { success: false, error: '缺少路径' };
     
     try {
-      const content = fs.readFileSync(filePath, 'utf-8');
-      return { success: true, data: content };
-    } catch (e: unknown) {
+      return await action.execute(params);
+    } catch (e) {
       return { success: false, error: String(e) };
     }
   }
   
-  private fileDelete(params: Record<string, unknown>): { success: boolean; error?: string } {
-    const fs = require('fs');
-    
-    const filePath = params.path as string;
-    if (!filePath) return { success: false, error: '缺少路径' };
-    
-    try {
-      fs.unlinkSync(filePath);
-      return { success: true };
-    } catch (e: unknown) {
-      return { success: false, error: String(e) };
-    }
-  }
-  
-  // 注册执行器
-  register(name: string, fn: (params: Record<string, unknown>) => { success: boolean; error?: string; data?: unknown }): void {
-    this.executors[name] = fn;
-  }
-  
-  // 执行行动
-  execute(action: string, params: Record<string, unknown> = {}): { success: boolean; error?: string; data?: unknown } {
-    const executor = this.executors[action];
-    if (!executor) {
-      return { success: false, error: `未知行动: ${action}` };
-    }
-    return executor(params);
-  }
-  
-  // 获取可用行动
-  getAvailableActions(): string[] {
-    return Object.keys(this.executors);
+  /**
+   * 获取可用行动
+   */
+  getAvailableActions(): Action[] {
+    return Array.from(this.actions.values());
   }
 }
 
+// ============================================================================
 // 输出系统主类
+// ============================================================================
+
 export class OutputSystem {
+  private config: OutputConfig;
   private generator: ResponseGenerator;
   private executor: ActionExecutor;
-  private defaultStyle: OutputStyle;
-  private defaultFormat: OutputFormat;
   
-  constructor() {
-    this.generator = new ResponseGenerator();
+  constructor(workspaceDir?: string) {
+    this.config = getConfig(workspaceDir);
+    this.generator = new ResponseGenerator(workspaceDir);
     this.executor = new ActionExecutor();
-    this.defaultStyle = 'friendly';
-    this.defaultFormat = 'text';
   }
   
-  // 生成回复
-  generateResponse(
+  // ==================== 生成回复 ====================
+  
+  /**
+   * 生成回复内容
+   */
+  generate(
     content: string,
-    style?: OutputStyle,
-    format?: OutputFormat,
-    templateType?: string
+    options?: {
+      style?: OutputStyle;
+      format?: OutputFormat;
+      template?: string;
+      params?: Record<string, string>;
+    }
   ): OutputContent {
-    const s = style || this.defaultStyle;
-    const f = format || this.defaultFormat;
+    const style = options?.style || this.generator.getPreferences().style;
+    const format = options?.format || 'text';
+    const template = options?.template || 'result';
+    const params = options?.params || {};
     
+    // 格式化内容
     let formattedContent = content;
-    
-    if (f === 'code') {
-      formattedContent = this.generator.formatCode(content);
+    if (format !== 'text') {
+      try {
+        const parsed = JSON.parse(content);
+        formattedContent = this.generator.format(parsed, format);
+      } catch {
+        formattedContent = this.generator.format(content, format);
+      }
     }
     
-    const text = this.generator.generate(formattedContent, s, templateType || 'result');
+    // 应用模板
+    const text = this.generator.generate(formattedContent, template, style, params);
     
     return {
-      format: f,
-      style: s,
+      format,
+      style,
       content: text,
       metadata: {
-        style: s,
-        format: f,
+        style,
+        format,
         timestamp: new Date().toISOString(),
       },
     };
   }
   
-  // 执行行动
-  executeAction(action: string, params: Record<string, unknown> = {}): { success: boolean; error?: string; data?: unknown } {
-    return this.executor.execute(action, params);
+  /**
+   * 生成错误回复
+   */
+  error(message: string, style?: OutputStyle): OutputContent {
+    return this.generate(message, { style, template: 'error' });
   }
   
-  // 格式化结果
-  formatResult(result: unknown, format: OutputFormat = 'text'): string {
-    if (format === 'json') {
-      return JSON.stringify(result, null, 2);
-    }
-    
-    if (typeof result === 'object' && result !== null) {
-      const entries = Object.entries(result);
-      return entries.map(([k, v]) => `**${k}**: ${v}`).join('\n');
-    }
-    
-    if (Array.isArray(result)) {
-      return this.generator.formatList(result.map(String));
-    }
-    
-    return String(result);
+  /**
+   * 生成成功回复
+   */
+  success(message: string, style?: OutputStyle): OutputContent {
+    return this.generate(message, { style, template: 'success' });
   }
   
-  // 创建确认提示
-  createConfirmationPrompt(question: string): string {
-    return `${question}\n\n请回复「是」或「否」`;
-  }
-  
-  // 创建澄清提示
-  createClarificationPrompt(question: string, options?: string[]): string {
-    if (options) {
-      return `${question}\n\n选项: ${options.join(' | ')}`;
-    }
-    return question;
-  }
-  
-  // 获取状态
-  getStatus(): { defaultStyle: OutputStyle; defaultFormat: OutputFormat; availableActions: string[] } {
+  /**
+   * 生成确认提示
+   */
+  confirm(question: string, style?: OutputStyle): OutputContent {
     return {
-      defaultStyle: this.defaultStyle,
-      defaultFormat: this.defaultFormat,
-      availableActions: this.executor.getAvailableActions(),
+      format: 'text',
+      style: style || this.generator.getPreferences().style,
+      content: this.generator.generate('', 'confirm', style, { question }),
+      metadata: { timestamp: new Date().toISOString() },
+      needsConfirmation: true,
+      confirmPrompt: question,
     };
   }
   
-  // 设置默认风格
-  setDefaultStyle(style: OutputStyle): void {
-    this.defaultStyle = style;
+  // ==================== 执行行动 ====================
+  
+  /**
+   * 执行行动
+   */
+  async execute(action: string, params: Record<string, unknown> = {}): Promise<ExecutionResult> {
+    return this.executor.execute(action, params);
   }
   
-  // 设置默认格式
-  setDefaultFormat(format: OutputFormat): void {
-    this.defaultFormat = format;
+  /**
+   * 注册自定义行动
+   */
+  registerAction(action: Action): void {
+    this.executor.register(action);
   }
+  
+  /**
+   * 获取可用行动
+   */
+  getAvailableActions(): Action[] {
+    return this.executor.getAvailableActions();
+  }
+  
+  // ==================== 偏好管理 ====================
+  
+  /**
+   * 设置用户偏好
+   */
+  setPreferences(prefs: Partial<UserPreferences>): void {
+    this.generator.setPreferences(prefs);
+  }
+  
+  /**
+   * 获取用户偏好
+   */
+  getPreferences(): UserPreferences {
+    return this.generator.getPreferences();
+  }
+  
+  // ==================== 格式化 ====================
+  
+  /**
+   * 格式化结果
+   */
+  formatResult(result: unknown, format: OutputFormat = 'text'): string {
+    return this.generator.format(result, format);
+  }
+  
+  /**
+   * 格式化代码
+   */
+  formatCode(code: string, language: string = ''): string {
+    return `\`\`\`${language}\n${code}\n\`\`\``;
+  }
+  
+  /**
+   * 格式化列表
+   */
+  formatList(items: string[], numbered: boolean = false): string {
+    return items.map((item, i) => numbered ? `${i + 1}. ${item}` : `• ${item}`).join('\n');
+  }
+  
+  // ==================== 状态 ====================
+  
+  /**
+   * 获取状态
+   */
+  getStatus(): {
+    preferences: UserPreferences;
+    availableActions: string[];
+  } {
+    return {
+      preferences: this.generator.getPreferences(),
+      availableActions: this.executor.getAvailableActions().map(a => a.name),
+    };
+  }
+}
+
+// ============================================================================
+// 导出
+// ============================================================================
+
+export function createOutputSystem(workspaceDir?: string): OutputSystem {
+  return new OutputSystem(workspaceDir);
 }
 
 export default OutputSystem;

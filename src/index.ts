@@ -8,7 +8,7 @@ import * as path from 'path';
 
 // 导出各个系统
 export { EmotionSystem, MoodType, EmotionState, EmotionConfig, DEFAULT_CONFIG as EMOTION_CONFIG } from './systems/emotion';
-export { InputAnalyzer, Intent, IntentType } from './systems/input';
+export { InputSystem, Intent, IntentType, Entity, Emotion } from './systems/input';
 export { BootstrapEngine, BootstrapState } from './systems/bootstrap';
 export { CognitionSystem, Task, Decision, UserPreferences } from './systems/cognition';
 export { OutputSystem, OutputContent, OutputFormat, OutputStyle } from './systems/output';
@@ -151,7 +151,7 @@ class AgentBootstrapContextEngine {
   info = {
     id: 'agent-bootstrap',
     name: 'Agent Bootstrap Context Engine',
-    version: '0.0.1',
+    version: '0.0.4',
   };
 
   private workspaceDir: string = '';
@@ -281,11 +281,160 @@ export const contextEngine = new AgentBootstrapContextEngine();
 // Plugin 定义
 // ============================================================================
 
+/**
+ * 自动配置 bootstrap-extra-files hook
+ * 读取 openclaw.plugin.json 中的 agentTemplates 配置
+ * 并将模板路径添加到 openclaw.json
+ */
+async function configureBootstrapExtraFiles(): Promise<void> {
+  const pluginDir = path.dirname(__dirname);
+  const pluginJsonPath = path.join(pluginDir, 'openclaw.plugin.json');
+  const openclawConfigPath = path.join(process.env.HOME || '', '.openclaw', 'openclaw.json');
+  
+  try {
+    // 读取插件配置
+    if (!fs.existsSync(pluginJsonPath)) {
+      console.log('⚠️ openclaw.plugin.json 不存在，跳过 bootstrap-extra-files 配置');
+      return;
+    }
+    
+    const pluginJson = JSON.parse(fs.readFileSync(pluginJsonPath, 'utf-8'));
+    
+    if (!pluginJson.agentTemplates) {
+      console.log('⚠️ 未找到 agentTemplates 配置，跳过');
+      return;
+    }
+    
+    const { path: templatePath, files } = pluginJson.agentTemplates;
+    
+    if (!templatePath || !files || !Array.isArray(files)) {
+      console.log('⚠️ agentTemplates 配置格式不正确，跳过');
+      return;
+    }
+    
+    // 构建完整路径
+    const templateDir = path.join(pluginDir, templatePath);
+    const paths: string[] = [];
+    
+    for (const file of files) {
+      const fullPath = path.join(templateDir, file);
+      if (fs.existsSync(fullPath)) {
+        paths.push(fullPath);
+        console.log(`✅ 找到模板: ${file}`);
+      } else {
+        console.log(`⚠️ 模板文件不存在: ${file}`);
+      }
+    }
+    
+    if (paths.length === 0) {
+      console.log('❌ 没有找到任何模板文件');
+      return;
+    }
+    
+    // 读取 openclaw.json
+    if (!fs.existsSync(openclawConfigPath)) {
+      console.log('⚠️ openclaw.json 不存在，跳过配置');
+      return;
+    }
+    
+    const openclawConfig = JSON.parse(fs.readFileSync(openclawConfigPath, 'utf-8'));
+    
+    // 初始化 hooks 结构
+    if (!openclawConfig.hooks) {
+      openclawConfig.hooks = {};
+    }
+    if (!openclawConfig.hooks.internal) {
+      openclawConfig.hooks.internal = {};
+    }
+    if (!openclawConfig.hooks.internal.entries) {
+      openclawConfig.hooks.internal.entries = {};
+    }
+    
+    // 检查是否已有配置
+    if (openclawConfig.hooks.internal.entries['bootstrap-extra-files']) {
+      console.log('⚠️ bootstrap-extra-files 已存在配置，将更新');
+    }
+    
+    // 添加/更新 bootstrap-extra-files 配置
+    openclawConfig.hooks.internal.entries['bootstrap-extra-files'] = {
+      enabled: true,
+      paths: paths,
+    };
+    
+    // 写回配置
+    fs.writeFileSync(openclawConfigPath, JSON.stringify(openclawConfig, null, 2));
+    console.log('✅ bootstrap-extra-files 配置已添加到 openclaw.json');
+    
+  } catch (error) {
+    console.error('❌ 配置 bootstrap-extra-files 失败:', error);
+  }
+}
+
+// ============================================================================
+// 插件状态检测函数
+// ============================================================================
+
+/**
+ * 检测 hooks 是否已注册
+ */
+function checkHooksStatus(): { installed: boolean; missing: string[] } {
+  const hooksDir = path.join(process.env.HOME || '', '.openclaw', 'hooks');
+  const expectedHooks = ['agent-init'];
+  const missing: string[] = [];
+  
+  for (const hook of expectedHooks) {
+    const hookPath = path.join(hooksDir, hook);
+    if (!fs.existsSync(hookPath)) {
+      missing.push(hook);
+    }
+  }
+  
+  return {
+    installed: missing.length === 0,
+    missing
+  };
+}
+
+/**
+ * 检测模板文件是否完整
+ */
+function checkTemplatesStatus(): { complete: boolean; missing: string[] } {
+  const pluginDir = path.dirname(__dirname);
+  const templateDir = path.join(pluginDir, 'agent-templates');
+  const expectedTemplates = [
+    'AGENTS.md',
+    'SOUL.md',
+    'MEMORY.md',
+    'IDENTITY.md',
+    'USER.md',
+    'TOOLS.md',
+    'BOOTSTRAP.md',
+    'HEARTBEAT.md'
+  ];
+  const missing: string[] = [];
+  
+  for (const template of expectedTemplates) {
+    const templatePath = path.join(templateDir, template);
+    if (!fs.existsSync(templatePath)) {
+      missing.push(template);
+    }
+  }
+  
+  return {
+    complete: missing.length === 0,
+    missing
+  };
+}
+
+// ============================================================================
+// Plugin 定义
+// ============================================================================
+
 const plugin = {
   id: 'agent-bootstrap',
-  name: 'Agent Bootstrap',
-  description: '完整的 Agent 核心系统：记忆、情感、心跳、输入、认知、输出、引导',
-  version: '0.0.1',
+  name: '@qcluffy/agent-bootstrap',
+  description: 'Complete Agent Core System: Memory, Emotion, Heartbeat, Input, Cognition, Output, Bootstrap',
+  version: '0.0.4',
   
   configSchema: {
     type: 'object' as const,
@@ -300,10 +449,30 @@ const plugin = {
     },
   },
   
-  register(api: { registerContextEngine?: (id: string, factory: () => unknown) => void }) {
+  async register(api: { registerContextEngine?: (id: string, factory: () => unknown) => void }) {
+    // 1. 插件注册
     console.log('✅ agent-bootstrap 插件已注册');
     
-    // 注册 context engine
+    // 2. 检测 hooks 状态
+    const hooksStatus = checkHooksStatus();
+    if (hooksStatus.installed) {
+      console.log('✅ agent-bootstrap Hooks 已注册');
+    } else {
+      console.log(`⚠️ agent-bootstrap Hooks 未注册，缺失: ${hooksStatus.missing.join(', ')}`);
+    }
+    
+    // 3. 检测模板状态
+    const templatesStatus = checkTemplatesStatus();
+    if (templatesStatus.complete) {
+      console.log('✅ agent-bootstrap Agent模板已加载');
+    } else {
+      console.log(`⚠️ agent-bootstrap Agent模板加载，部分缺失 (${templatesStatus.missing.join(', ')})`);
+    }
+    
+    // 4. 自动配置 bootstrap-extra-files
+    await configureBootstrapExtraFiles();
+    
+    // 5. 注册 context engine
     if (api && typeof api.registerContextEngine === 'function') {
       api.registerContextEngine('agent-bootstrap', () => new AgentBootstrapContextEngine());
       console.log('✅ agent-bootstrap Context Engine 已注册');

@@ -37,6 +37,7 @@
     }
   },
   "hooks": [
+    "agent-init",
     "memory-system",
     "emotion-system",
     "heartbeat-system",
@@ -47,5 +48,18 @@
     "auto-bootstrap",
     "agent-lifecycle"
   ],
-  "skills": []
+  "skills": [],
+  "agentTemplates": {
+    "path": "agent-templates",
+    "files": [
+      "AGENTS.md",
+      "SOUL.md",
+      "MEMORY.md",
+      "IDENTITY.md",
+      "USER.md",
+      "TOOLS.md",
+      "BOOTSTRAP.md",
+      "HEARTBEAT.md"
+    ]
+  }
 }
